@@ -47,6 +47,7 @@ int __fastcall Craft(uintptr_t schematic, void*, uintptr_t pc) {
         LOG("inventory: can't craft %s, missing%s", engine::Name(result).c_str(), missing.c_str());
         return 0;
     }
+    player::RefreshOnce once;  // the HUD once at the end, not after each material and the result
     for (int32_t i = 0; requirements.data && i < requirements.num; i++) {
         uintptr_t requirement = requirements.data + static_cast<uintptr_t>(i) * RequirementSize;
         if (!At<uint8_t>(requirement, RequirementConsumed)) continue;

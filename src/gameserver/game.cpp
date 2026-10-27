@@ -36,14 +36,33 @@ constexpr uint32_t kGetAllActorsOfClass = 0x016B4FB0;
 constexpr int GameModeFailedStarts = 0x368;  // TArray<AActor*> of starts SpawnDefaultPawnFor could not use
 uintptr_t g_gameState = 0, g_controller = 0, g_playerState = 0;
 uintptr_t g_spawnWorld = 0, g_spawnSpot = 0;  // the fallback spot, chosen once per world
+// An outpost (its zone instance id names a BP_ZT_TheOutpost theme) gets the outpost's own classes: its storm shield
+// core and control panel only answer a FortPlayerControllerOutpost (their CanInteract casts to it). The outpost's game
+// mode, FortGameModeOutpost, is in the server module this client lacks, so the plain one gets them like the Zone ones.
+uintptr_t g_outpostGameState = 0, g_outpostController = 0, g_outpostPlayerState = 0;
+
+bool IsOutpost(uintptr_t gameMode) {
+    auto id = reinterpret_cast<const wchar_t*>(engine::At<uint32_t>(gameMode, FortGameModeZoneInstanceId));
+    return id && wcsstr(id, L"/Outposts/BP_ZT_TheOutpost");
+}
+
+bool OutpostClasses() {
+    if (!g_outpostController) {
+        g_outpostController = engine::Load(L"/Game/TheOutpost/Blueprints/BP_PlayerControllerOutpost.BP_PlayerControllerOutpost_C");
+        if (!g_outpostController) g_outpostController = engine::FindClass("/Script/FortniteGame.FortPlayerControllerOutpost");
+    }
+    return g_outpostGameState && g_outpostController && g_outpostPlayerState;
+}
 
 void __fastcall PreInitializeComponents(uintptr_t gameMode, void*) {
     bool zone = game::g_on.zone && engine::At<int32_t>(gameMode, FortGameModeZoneInstanceId + 4) > 1;
     if (zone) {
-        engine::At<uint32_t>(gameMode, GameModeGameStateClass) = static_cast<uint32_t>(g_gameState);
-        engine::At<uint32_t>(gameMode, GameModePlayerControllerClass) = static_cast<uint32_t>(g_controller);
-        engine::At<uint32_t>(gameMode, GameModePlayerStateClass) = static_cast<uint32_t>(g_playerState);
-        LOG("zone: %s spawns the Zone game state, player controller and player state", engine::Describe(gameMode).c_str());
+        bool outpost = IsOutpost(gameMode) && OutpostClasses();
+        engine::At<uint32_t>(gameMode, GameModeGameStateClass) = static_cast<uint32_t>(outpost ? g_outpostGameState : g_gameState);
+        engine::At<uint32_t>(gameMode, GameModePlayerControllerClass) = static_cast<uint32_t>(outpost ? g_outpostController : g_controller);
+        engine::At<uint32_t>(gameMode, GameModePlayerStateClass) = static_cast<uint32_t>(outpost ? g_outpostPlayerState : g_playerState);
+        LOG("zone: %s spawns the %s game state, player controller and player state", engine::Describe(gameMode).c_str(),
+            outpost ? "Outpost" : "Zone");
     }
     reinterpret_cast<void(__thiscall*)(uintptr_t)>(engine::Va(kPreInitialize))(gameMode);  // spawns the game state
     uintptr_t gameState = engine::At<uint32_t>(gameMode, GameModeGameState);
@@ -106,6 +125,8 @@ bool Install() {
     g_gameState = engine::FindClass("/Script/FortniteGame.FortGameStateZone");
     g_controller = engine::FindClass("/Script/FortniteGame.FortPlayerControllerZone");
     g_playerState = engine::FindClass("/Script/FortniteGame.FortPlayerStateZone");
+    g_outpostGameState = engine::FindClass("/Script/FortniteGame.FortGameStateOutpost");
+    g_outpostPlayerState = engine::FindClass("/Script/FortniteGame.FortPlayerStateOutpost");
     if (!g_gameState || !g_controller || !g_playerState) {
         LOG("zone: the Zone classes were not found; left alone");
         return false;
@@ -126,7 +147,7 @@ using engine::At;
 namespace {
 enum Event { kNone, kMatchState, kRestartPlayer, kHudEnterState, kPickup, kExecuteItem, kConsoleCommand, kWorldTick,
              kHudZoneCompleted, kCraftRequest, kDisassembleRequest, kSwapRequest, kEquipRequest, kBuildingDamaged,
-             kLeaveZone };
+             kLeaveZone, kStormshieldUsed };
 const struct {
     const char* path;
     Event event;
@@ -150,6 +171,9 @@ const struct {
     { "/Script/FortniteGame.BuildingActor.OnDamageServer", kBuildingDamaged },
     // The menu's Leave Zone (LeaveButton): the backpack is saved before the zone goes.
     { "/Script/FortniteGame.FortPlayerController.ServerReturnToMainMenu", kLeaveZone },
+    // A player used an outpost's storm shield core or amplifier (objectives::OnStormshieldUsed).
+    { "/Game/TheOutpost/Blueprints/BP_StormShield_Core.BP_StormShield_Core_C.BlueprintOnInteract", kStormshieldUsed },
+    { "/Game/TheOutpost/Blueprints/BP_StormShield_Amplifier.BP_StormShield_Amplifier_C.BlueprintOnInteract", kStormshieldUsed },
 };
 
 const struct {
@@ -204,7 +228,7 @@ void LoadMission(const std::wstring& path) {
         LOG("game: can't load the mission %ls", path.c_str());
         return;
     }
-    if (g_on.director) director::UseOldEncounters();
+    if (g_on.director) director::UseOldEncounters(!Outpost());
     LOG("game: LoadMission(%s)", engine::Describe(info).c_str());
     struct {
         uintptr_t context, info;
@@ -288,6 +312,35 @@ void AdvanceNavigation(ULONGLONG now) {
     }
 }
 
+// The DLL's own share of a frame: a tick that takes longer than kSlowTickMs is logged with its slowest step (at most
+// one line every 10 s), so hitches it causes show in the log. Mark() closes a step; it costs a counter read.
+constexpr double kSlowTickMs = 4.0;
+constexpr ULONGLONG kSlowTickLogMs = 10000;
+struct TickTimer {
+    LARGE_INTEGER start{}, last{};
+    const char* slowest = "";
+    double slowestMs = 0.0;
+};
+TickTimer* g_timer = nullptr;
+
+double Milliseconds(const LARGE_INTEGER& from, const LARGE_INTEGER& to) {
+    static LARGE_INTEGER frequency{};
+    if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
+    return static_cast<double>(to.QuadPart - from.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart);
+}
+
+void Mark(const char* step) {
+    if (!g_timer) return;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    double ms = Milliseconds(g_timer->last, now);
+    if (ms > g_timer->slowestMs) {
+        g_timer->slowestMs = ms;
+        g_timer->slowest = step;
+    }
+    g_timer->last = now;
+}
+
 void Advance(ULONGLONG now) {
     SyncWorld();
     director::Check();
@@ -295,6 +348,7 @@ void Advance(ULONGLONG now) {
     EnsureConsole(pc);
     lobby::Advance(now);
     net::AdvanceClient(now);
+    Mark("the lobby");
     if (!IsZone(engine::GameMode())) return;
     uintptr_t pawn = engine::PawnOf(pc);
 
@@ -321,8 +375,10 @@ void Advance(ULONGLONG now) {
             g_zone.setupAt = now;
             g_zone.pawnSince = 0;
             player::Setup(pc, pawn);
+            if (!Tutorial() && !Outpost()) director::PreloadRoamers();  // the loading screen is still up
         }
     }
+    Mark("the player's setup");
     uintptr_t gameState = engine::GameState();
     uint8_t gameplayState = gameState ? At<uint8_t>(gameState, GameStateGameplayState) : 0;
     if (g_on.player && pawn && pawn == g_zone.setupPawn && engine::IsLive(pawn)) {
@@ -349,6 +405,7 @@ void Advance(ULONGLONG now) {
         player::FixEffectMeshes(pawn);
         if (gameplayState != 2 && gameplayState != 4) loadout::AutoSave(pc, now);
     }
+    Mark("the player");
 
     // 2. The AI director, once the match runs; it gets WorldReady on the world manager's next Running tick.
     if (g_on.director && g_zone.inProgress && !g_zone.directorRequested) {
@@ -361,7 +418,8 @@ void Advance(ULONGLONG now) {
         LOG("game: the AI director got WorldReady; its encounter timer runs");
     }
     director::UpdateGoals();
-    director::UpdateRoamers(g_zone.missionLoaded && gameplayState != 2 && gameplayState != 4 && !Tutorial());
+    director::UpdateRoamers(g_zone.missionLoaded && gameplayState != 2 && gameplayState != 4 && !Tutorial() && !Outpost());
+    Mark("the AI director");
 
     // 3. The mission, once the tiles are in (world manager Running), the navmesh is built, the player is set up and
     // the director is ready (or clearly won't be). A rift query made before the navmesh exists aborts the encounter.
@@ -378,15 +436,27 @@ void Advance(ULONGLONG now) {
         if (g_on.director && !director::Ready()) LOG("game: starting the mission without a ready AI director");
         std::wstring chosen = lobby::MissionInfo();  // the Play tab's mission, else Close the Gate
         LoadMission(chosen.empty() ? std::wstring(kDefaultMission) : chosen);
+        if (Outpost()) objectives::LinkOutpost();
         lobby::ForgetMission();
         // The husks outside the objective too, now that their spawn queries have a navmesh.
-        if (g_on.director && director::Ready() && !Tutorial()) director::StartAmbient();
+        if (g_on.director && director::Ready() && !Tutorial() && !Outpost()) {
+            director::StartAmbient();
+            director::WarmNavigation();
+        }
     }
+    Mark("the navmesh and the mission's start");
     if (g_on.host && g_zone.missionLoaded && !g_zone.hostTried && !Tutorial()) {
         g_zone.hostTried = true;
         if (net::Host(0)) net::Open();
     }
     net::Advance(now);
+    Mark("co-op");
+    static ULONGLONG nextOutpostCheck = 0;
+    if (g_zone.missionLoaded && Outpost() && now >= nextOutpostCheck) {
+        nextOutpostCheck = now + 1000;
+        objectives::OutpostTick();
+    }
+    Mark("the outpost");
 
     // 4. The HUD, if it still hasn't come up.
     if (g_on.ui && g_zone.setupAt && !g_zone.uiForced && now - g_zone.setupAt > kUiWaitMs && player::UiState() == 0) {
@@ -466,6 +536,9 @@ void OnEvent(int event, uintptr_t object, void* params) {
         if (g_on.player && g_zone.setupPawn && object && object == engine::LocalPlayerController() && IsZone(engine::GameMode()))
             loadout::Save(object);
         break;
+    case kStormshieldUsed:  // after the blueprint's own interaction has run
+        if (object) g_queue.push_back([object] { objectives::OnStormshieldUsed(object); });
+        break;
     case kCraftRequest:
     case kDisassembleRequest:
     case kSwapRequest:
@@ -480,6 +553,11 @@ void OnEvent(int event, uintptr_t object, void* params) {
 bool Tutorial() {
     uintptr_t world = engine::World();
     return world && engine::Name(world) == "Zone_Onboarding_FarmsteadFort";
+}
+
+bool Outpost() {
+    uintptr_t world = engine::World();
+    return world && engine::Name(world).rfind("Zone_Outpost_PvE_", 0) == 0;
 }
 
 void Tick() {
@@ -502,8 +580,22 @@ void Tick() {
         std::lock_guard<std::recursive_mutex> guard(engine::Lock());
         queue.swap(g_queue);
     }
+    TickTimer timer;
+    QueryPerformanceCounter(&timer.start);
+    timer.last = timer.start;
+    g_timer = &timer;
     for (auto& action : queue) action();
+    Mark("commands and queued work");
     Advance(now);
+    g_timer = nullptr;
+    LARGE_INTEGER end;
+    QueryPerformanceCounter(&end);
+    double total = Milliseconds(timer.start, end);
+    static ULONGLONG nextSlowLog = 0;
+    if (total > kSlowTickMs && now >= nextSlowLog) {
+        nextSlowLog = now + kSlowTickLogMs;
+        LOG("game: a slow tick, %.1f ms (%s: %.1f ms)", total, timer.slowest, timer.slowestMs);
+    }
     busy = false;
 }
 
@@ -568,6 +660,10 @@ bool Command(const std::string& cmd, const std::string& arg) {
         g_queue.push_back([arg] { net::Inspect(arg); });
     } else if (cmd == "netdestroyed" && !arg.empty()) {
         g_queue.push_back([arg] { net::InspectDestroyed(arg); });
+    } else if (cmd == "gadget" && !arg.empty()) {
+        g_queue.push_back([arg] { loadout::GiveLobbyGadget(arg); });
+    } else if (cmd == "feedback" && !arg.empty()) {
+        g_queue.push_back([arg] { player::TestFeedback(arg); });
     } else if (cmd == "editcheck") {
         g_queue.push_back([] { player::EditCheck(); });
     } else if (cmd == "team") {

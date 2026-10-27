@@ -6,6 +6,9 @@ namespace mem {
 
 struct Range { uintptr_t begin, end; };
 static std::vector<Range> g_ranges;
+// Reads come from the game thread and from ProcessEvent on other threads; a miss inserts into g_ranges, which would
+// move it under a reader on another thread.
+static SRWLOCK g_rangesLock = SRWLOCK_INIT;
 
 static bool IsReadableProtect(DWORD protect) {
     if (protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
@@ -14,6 +17,7 @@ static bool IsReadableProtect(DWORD protect) {
 }
 
 void Snapshot() {
+    AcquireSRWLockExclusive(&g_rangesLock);
     g_ranges.clear();
     SYSTEM_INFO si;
     GetSystemInfo(&si);
@@ -30,6 +34,7 @@ void Snapshot() {
         if (end <= addr) break;
         addr = end;
     }
+    ReleaseSRWLockExclusive(&g_rangesLock);
 }
 
 static bool Cached(uintptr_t addr, size_t len) {
@@ -58,8 +63,14 @@ static bool AddRegion(uintptr_t addr) {
 
 bool Readable(uintptr_t addr, size_t len) {
     if (addr < 0x10000 || addr + len < addr) return false;
-    if (Cached(addr, len)) return true;
-    return AddRegion(addr) && Cached(addr, len);
+    AcquireSRWLockShared(&g_rangesLock);
+    bool cached = Cached(addr, len);
+    ReleaseSRWLockShared(&g_rangesLock);
+    if (cached) return true;
+    AcquireSRWLockExclusive(&g_rangesLock);
+    bool added = AddRegion(addr) && Cached(addr, len);
+    ReleaseSRWLockExclusive(&g_rangesLock);
+    return added;
 }
 
 bool Copy(void* dst, uintptr_t src, size_t len) {

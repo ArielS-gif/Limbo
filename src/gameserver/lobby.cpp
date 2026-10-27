@@ -17,6 +17,10 @@ namespace {
 // (+0x74) is wrapped: the mission selected on the theater map is read here, the launch screen shown (below), and the
 // zone opened with that mission's generator. The game's own search runs only when no mission can be read.
 constexpr uint32_t kStartMatchmakingExec = 0x00A5CA20;
+// Quick Match (the hex in the middle of the map) starts with FortMatchmakingContext.StartCriticalMission(
+// MinMissionPower, MaxMissionPower) instead, a search for any mission in that threat range. Its exec thunk reads the
+// two ints and calls the implementation (thiscall, ret 8) from 00A5C54C; that call is pointed here.
+constexpr uint32_t kStartCriticalMissionCall = 0x00A5C54C, kStartCriticalMission = 0x007F0880;
 // Start Mission is greyed out ("Cannot Start Mission until the entire party is in Homebase") when
 // FortPartyContext.IsEntirePartyInFrontEnd says no; offline, after a few trips to zones, the local member's party state
 // can stay on its zone. Wrapped the same way: in the frontend, a party of one is in Homebase.
@@ -67,6 +71,11 @@ constexpr uint32_t kIsWorldRecordLoadedExec = 0x00A405C0;
 // current theater's outpost zone with its own mission (Stonewood the first, Plankerton the second, Canny Valley the
 // third, Twine Peaks the fourth), and the outpost is always permitted.
 constexpr uint32_t kEnterOutpostExec = 0x00A28740, kIsOutpostPermittedExec = 0x00A3FBE0;
+// The Play tab's locks: a tile is locked and its Start Mission greyed out while the player doesn't meet its
+// requirements, the mission's power above all (up to 30 in Stonewood, 10715 in Twine Peaks, more than a homebase can
+// reach). FortPlayerControllerFrontEnd::IsRequirementsMet says yes to everything when the controller's bUnlockAllZones
+// is set, Epic's own switch; it's set here, so every mission can be started.
+constexpr int FrontEndUnlockAllZones = 0xC64;
 // The world manager has the backend validate the zone's mission (world/validate) or the zone never loads ("LoadZoneWorld
 // Failed"): a mission of that theater goes along (its outpost tile's, or Stonewood's Close the Gate).
 const struct {
@@ -197,14 +206,8 @@ void OpenOutpost(int n, const std::string& theater, const std::string& mission) 
     }
 }
 
-// The selected mission's zone, queued for the next tick. False (the game's own search goes on) if none can be read.
-bool OpenSelected() {
-    uintptr_t viewer = engine::FindFirstA("FortTheaterMapViewer");  // TheaterMapViewer_C in the frontend
-    uintptr_t tile = viewer ? At<uint32_t>(viewer, ViewerSelectedTile) : 0;
-    if (!engine::IsA(tile, "FortTheaterMapTile")) {
-        LOG("lobby: no mission tile selected on the theater map");
-        return false;
-    }
+// A map tile's mission zone, queued for the next tick. False (the game's own search goes on) if it can't be read.
+bool OpenTile(uintptr_t viewer, uintptr_t tile) {
     std::string mission = ReadFString(tile + TileMissionData);
     std::string generator = ReadFString(tile + TileMissionData + MissionGeneratorRef + SoftPath);
     std::string theme = PathOf(At<uint32_t>(tile, TileZoneTheme));
@@ -236,6 +239,34 @@ bool OpenSelected() {
     return true;
 }
 
+bool OpenSelected() {
+    uintptr_t viewer = engine::FindFirstA("FortTheaterMapViewer");  // TheaterMapViewer_C in the frontend
+    uintptr_t tile = viewer ? At<uint32_t>(viewer, ViewerSelectedTile) : 0;
+    if (!engine::IsA(tile, "FortTheaterMapTile")) {
+        LOG("lobby: no mission tile selected on the theater map");
+        return false;
+    }
+    return OpenTile(viewer, tile);
+}
+
+// Quick Match, the hex in the middle of the map (BP_Hex_CriticalMission, no mission of its own): the server would pick
+// a mission in the chosen threat range. One of the theater's mission tiles on the map is picked here, at random.
+bool OpenQuickMatch(int32_t minPower, int32_t maxPower) {
+    uintptr_t viewer = engine::FindFirstA("FortTheaterMapViewer");
+    if (!viewer) return false;
+    std::vector<uintptr_t> tiles;
+    for (uintptr_t tile : engine::FindAllA("FortTheaterMapTile")) {
+        std::string theme = PathOf(At<uint32_t>(tile, TileZoneTheme));
+        bool mission = false;
+        for (const auto& entry : kThemeMaps)
+            if (theme.find(std::string("/") + entry.theme + ".") != std::string::npos)
+                mission = strncmp(entry.name, "Outpost", 7) != 0 && strcmp(entry.name, "Onboarding") != 0;
+        if (mission && !ReadFString(tile + TileMissionData).empty()) tiles.push_back(tile);
+    }
+    LOG("lobby: Quick Match (power %d-%d): %zu mission tile(s) on the map", minPower, maxPower, tiles.size());
+    return !tiles.empty() && OpenTile(viewer, tiles[GetTickCount() % tiles.size()]);
+}
+
 void Finish(void* stack) {
     uint32_t& code = At<uint32_t>(reinterpret_cast<uintptr_t>(stack), FrameCode);
     if (code) code++;  // P_FINISH, as the original exec does before its call
@@ -259,6 +290,18 @@ void __fastcall ExecStartMatchmaking(uintptr_t context, void*, void* stack, void
         return;
     }
     CallExec(kStartMatchmakingExec, context, stack, result);
+}
+
+void __fastcall StartCriticalMission(uintptr_t context, void*, int32_t minPower, int32_t maxPower) {
+    if (g_lobby.active) {
+        g_lobby.launch = true;
+        return;
+    }
+    if (OpenSelected() || OpenQuickMatch(minPower, maxPower)) {
+        StartLaunchScreen(context);
+        return;
+    }
+    reinterpret_cast<void(__thiscall*)(uintptr_t, int32_t, int32_t)>(engine::Va(kStartCriticalMission))(context, minPower, maxPower);
 }
 
 // The launch screen for the zone in g_travel; Advance opens the zone (or joins another player's) when it ends.
@@ -312,6 +355,20 @@ void __fastcall ExecDisconnectFromLobby(uintptr_t context, void*, void* stack, v
     if (!g_lobby.active) return CallExec(kDisconnectFromLobbyExec, context, stack, result);
     Finish(stack);
     g_lobby.cancel = true;
+}
+
+// The outpost menu's Leave with Party (Outpost_MainWidget.LeavePartyAndGame) only calls FortPartyContext.LeaveParty:
+// the real party service took a player who left their party out of the zone. A party of one leaves nothing here, so in
+// a zone it goes back to the lobby instead (next tick, as the results screen's leave does); in the lobby it leaves the
+// party as before.
+constexpr uint32_t kLeavePartyExec = 0x00A41340;
+bool g_leaveZone = false;
+
+void __fastcall ExecLeaveParty(uintptr_t context, void*, void* stack, void* result) {
+    uintptr_t gameMode = engine::GameMode();
+    if (!gameMode || engine::Name(At<uint32_t>(gameMode, 0xC)) != "FortGameMode") return CallExec(kLeavePartyExec, context, stack, result);
+    Finish(stack);
+    g_leaveZone = true;
 }
 
 void __fastcall ExecIsInLobby(uintptr_t context, void*, void* stack, void* result) {
@@ -555,6 +612,15 @@ std::wstring ReadWide(uintptr_t at) {
     int32_t num = At<int32_t>(at, 4);
     return data && num > 1 ? std::wstring(data, num - 1) : std::wstring();
 }
+void UnlockAllZones() {
+    static uintptr_t seen = 0;
+    uintptr_t controller = engine::LocalPlayerController();
+    if (!controller || controller == seen) return;
+    seen = controller;
+    if (!engine::IsA(controller, "FortPlayerControllerFrontEnd")) return;
+    At<uint8_t>(controller, FrontEndUnlockAllZones) = 1;
+    LOG("lobby: every zone unlocked (bUnlockAllZones)");
+}
 }  // namespace
 
 bool Install() {
@@ -564,6 +630,8 @@ bool Install() {
         return false;
     }
     At<uint32_t>(function, FunctionNative) = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&ExecStartMatchmaking));
+    if (!engine::PatchCall(kStartCriticalMissionCall, kStartCriticalMission, reinterpret_cast<void*>(&StartCriticalMission)))
+        LOG("lobby: StartCriticalMission's call not found: a quest's mission tile still searches for a server");
     const struct {
         const char* function;
         uint32_t exec;
@@ -574,6 +642,7 @@ bool Install() {
         { "/Script/FortniteGame.FortMatchmakingContext.CancelMatchmaking", kCancelMatchmakingExec, &ExecCancelMatchmaking },
         { "/Script/FortniteGame.FortMatchmakingContext.DisconnectFromLobby", kDisconnectFromLobbyExec, &ExecDisconnectFromLobby },
         { "/Script/FortniteGame.FortMatchmakingContext.IsInLobby", kIsInLobbyExec, &ExecIsInLobby },
+        { "/Script/FortniteGame.FortPartyContext.LeaveParty", kLeavePartyExec, &ExecLeaveParty },
         { "/Script/FortniteGame.FortMatchmakingContext.IsWorldRecordLoaded", kIsWorldRecordLoadedExec, &ExecIsWorldRecordLoaded },
         { "/Script/FortniteGame.FortMatchmakingContext.EnterOutpost", kEnterOutpostExec, &ExecEnterOutpost },
         { "/Script/FortniteGame.FortMatchmakingContext.IsOutpostPermitted", kIsOutpostPermittedExec, &ExecIsOutpostPermitted },
@@ -594,6 +663,12 @@ bool Install() {
 }
 
 void Advance(uint64_t now) {
+    UnlockAllZones();
+    if (g_leaveZone) {
+        g_leaveZone = false;
+        LOG("lobby: left the party in a zone; back to the lobby");
+        endzone::RequestLeave();
+    }
     if (g_lobby.active) AdvanceLobby(now);
     if (g_travel.empty()) return;
     std::string url;

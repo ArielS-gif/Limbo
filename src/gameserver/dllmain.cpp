@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <string>
 #include "dump.h"
+#include "engine.h"
 #include "fixes.h"
 #include "game.h"
 #include "log.h"
@@ -84,6 +85,21 @@ static DWORD WINAPI MainThread(LPVOID) {
         return 0;
     }
     dump::KnownOffsets();
+
+    // Injected that early, the tables can exist before the game's own classes are registered (2277 objects): their
+    // functions weren't found, the Play tab's hook stayed out, and Enter Outpost went to a server search that never
+    // ends. The hooks wait for those classes.
+    const char* const kLateFunctions[] = { "/Script/FortniteGame.FortMatchmakingContext.StartMatchmaking",
+                                           "/Script/FortniteGame.FortKismetLibrary.GetAIDirector" };
+    bool registered = false;
+    for (int attempt = 0; attempt < 240 && !registered; attempt++) {
+        if (attempt) Sleep(250);
+        registered = true;
+        for (const char* function : kLateFunctions) registered = registered && engine::FindFunction(function);
+    }
+    ue::Refresh();
+    LOG("%s (%d objects)", registered ? "the game's classes are registered" : "the game's classes still aren't all there after 60 s",
+        ue::g.numObjects);
 
     fixes::Install();
     game::Install();

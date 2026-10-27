@@ -32,6 +32,11 @@ constexpr uint32_t kApplyModToAttribute = 0x01F47EC0;
 constexpr int AbilitySystemActiveEffects = 0x4F4;  // UAbilitySystemComponent.ActiveGameplayEffects
 constexpr uint32_t kModOverride = 3;               // EGameplayModOp::Override
 constexpr int PcClientLoaded = 0x510, PcServerLoaded = 0x511, PcPlayerState = 0x254, PcPlayer = 0x288;
+// An outpost's storm shield core answers its owner only: FortPlayerControllerOutpost::IsOutpostOwner (008A3CB0) is the
+// player state's bIsWorldDataOwner on a server, which the outpost's own game mode (server code) would set. The host's
+// player owns the outpost it opened; FortPlayerStateOutpost.bCanEditOutpost lets it change the outpost too.
+constexpr int PlayerStateOwnerBits = 0x2B4;  // bit 0 bIsWorldDataOwner, bit 1 bIsGameSessionOwner
+constexpr int PlayerStateCanEditOutpost = 0x760;
 // AFortInventory.Inventory, an FFortItemList at 0x244: ReplicatedEntries (+0x80) and ItemInstances (+0xC8).
 constexpr int InventoryEntries = 0x244 + 0x80, InventoryInstances = 0x244 + 0xC8;
 // The inventory's pending changes (TArray<UFortWorldItem*>): HandleInventoryLocalUpdate passes them to the controller,
@@ -47,7 +52,7 @@ constexpr int QuickBarsPrimary = 0x240, QuickBarSlots = 0x8, QuickBarSlotSize = 
 constexpr int ItemOwnerInventory = 0x48, ItemEntry = 0x4C;  // UFortWorldItem
 // FFortItemEntry (0x7C bytes). The members that own heap memory are emptied in the inventory's copy, so the item's
 // entry and the copy never free the same buffer.
-constexpr int EntrySize = 0x7C, EntryCount = 0xC, EntryDefinition = 0x10, EntryLoadedAmmo = 0x1C, EntryGuid = 0x38;
+constexpr int EntrySize = 0x7C, EntryCount = 0xC, EntryDefinition = 0x10, EntryLevel = 0x18, EntryLoadedAmmo = 0x1C, EntryGuid = 0x38;
 constexpr int kEntryHeapMembers[] = { 0x20 /*AlterationDefinitions*/, 0x2C /*ItemSource*/, 0x4C /*GiftingInfo name*/,
                                       0x64 /*StateValues*/ };
 constexpr int PawnHealthSet = 0x754, PawnMovementSet = 0x75C, PawnAbilitySystem = 0x770;
@@ -78,7 +83,8 @@ constexpr int GameDataEditTool = 0x994;     // TSoftObjectPtr<UFortEditToolItemD
 constexpr float kEditCheckRange = 1000.0f;
 // OnAboutToEnterBackpack fires on the pickup's effect (B_Pickups_C, an AFortPickupEffect), not on the AFortPickup.
 constexpr int EffectItemDefinition = 0x248, ActorOwner = 0x5C;
-constexpr int PickupEntry = 0x250;  // AFortPickup.PrimaryPickupItemEntry
+constexpr int PickupEntry = 0x250;
+constexpr int GadgetDecoItem = 0x5C0;  // UFortGadgetItemDefinition.DecoItemDefinition  // AFortPickup.PrimaryPickupItemEntry
 constexpr int PawnStasisMode = 0x870;  // AFortPlayerPawn: 0 None, 1 NoMovement, 2 NoMovementOrTurning
 // Teams: AFortGameMode vtable getters (rebased already when read from the vtable).
 constexpr int VtGetTeamInfo = 0x464, VtSetPlayerTeam = 0x474, VtCreateTeam = 0x478;  // (team) / (team, pc) / (team)
@@ -131,6 +137,17 @@ const KitItem kKit[] = {
 };
 constexpr wchar_t kBluGlo[] = L"/Game/Missions/Secondary/BluGlo/BluGloWorldItemData.BluGloWorldItemData";
 constexpr int kBluGloCount = 100;  // cheats: the Gate's BluGlo deposits without harvesting first
+// Cheats: infinite ammo uses none up, but a reload still stops when the inventory holds none of the weapon's ammo: a
+// shotgun's shell-by-shell reload loaded the one shell the cheat gave and stopped (crafted or brought, it held 1). Every
+// kind the weapons use is topped up to kAmmoTopUp.
+const wchar_t* const kAmmo[] = {
+    L"/Game/Weapons/AmmoItemData/AmmoDataBulletsLight.AmmoDataBulletsLight",
+    L"/Game/Weapons/AmmoItemData/AmmoDataBulletsMedium.AmmoDataBulletsMedium",
+    L"/Game/Weapons/AmmoItemData/AmmoDataBulletsHeavy.AmmoDataBulletsHeavy",
+    L"/Game/Weapons/AmmoItemData/AmmoDataShells.AmmoDataShells",
+    L"/Game/Weapons/AmmoItemData/AmmoDataEnergyCell.AmmoDataEnergyCell",
+};
+constexpr int kAmmoTopUp = 500;
 
 // Per controller: every player in the zone is set up (co-op: the host's and the joined players').
 std::set<uintptr_t> g_setUp;            // the controllers whose kit went in (not again for a respawned pawn)
@@ -147,7 +164,17 @@ bool IsLocal(uintptr_t pc) {
     return pc && engine::IsA(At<uint32_t>(pc, PcPlayer), "LocalPlayer");
 }
 
+// While a RefreshOnce exists (a craft: each material taken, then the result added), the HUD isn't refreshed after each
+// change but once at the end. Refreshing rebuilds the open inventory screen, and a craft did it once per material and
+// again for the result, all in one frame: the game stopped for half a second when a craft finished.
+int g_refreshHeld = 0;
+uintptr_t g_refreshPending = 0;
+
 void Refresh(uintptr_t pc) {
+    if (g_refreshHeld) {
+        g_refreshPending = pc;
+        return;
+    }
     uintptr_t inventory = At<uint32_t>(pc, PcWorldInventory), quickBars = At<uint32_t>(pc, PcQuickBars);
     if (!inventory || !quickBars) return;
     if (!IsLocal(pc)) return;  // the HUD updates below are the local player's; a joined player's inventory replicates
@@ -525,12 +552,32 @@ bool Setup(uintptr_t pc, uintptr_t pawn) {
         return false;
     }
     LOG("player: setting up %s with %s", engine::Describe(pc).c_str(), engine::Describe(pawn).c_str());
+    uintptr_t state = At<uint32_t>(pc, PcPlayerState);
+    if (state && IsLocal(pc) && engine::IsA(pc, "FortPlayerControllerOutpost") && !(At<uint8_t>(state, PlayerStateOwnerBits) & 1)) {
+        At<uint8_t>(state, PlayerStateOwnerBits) |= 1;
+        At<uint8_t>(state, PlayerStateCanEditOutpost) = 1;
+        LOG("player: %s owns this outpost", engine::Name(pc).c_str());
+    }
     uintptr_t inventory = Inventory(pc), quickBars = QuickBars(pc);
     if (!inventory || !quickBars) {
         LOG("player: no inventory or quickbars; stopping");
         return false;
     }
     At<int32_t>(pc, PcBackpackSize) = 999;
+    // How long each part takes, for the one line logged at the end (the setup is one tick of the game thread).
+    LARGE_INTEGER frequency, mark;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&mark);
+    std::string parts;
+    auto part = [&](const char* name) {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        char text[64];
+        snprintf(text, sizeof(text), "%s%s %.0f", parts.empty() ? "" : ", ", name,
+                 static_cast<double>(now.QuadPart - mark.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart));
+        parts += text;
+        mark = now;
+    };
     bool firstSetup = !g_setUp.count(pc);
     loadout::Prepare(pc);
     if (firstSetup) {  // the kit once per controller, not again for a respawned pawn
@@ -538,6 +585,7 @@ bool Setup(uintptr_t pc, uintptr_t pawn) {
         bool tutorial = game::Tutorial();  // starts from nothing: the harvest tool, building pieces, the edit tool
         bool materials = !tutorial && loadout::GiveMaterials(pc);
         bool backpack = !tutorial && loadout::GiveBackpack(pc);
+        if (game::Outpost()) loadout::GiveOutpostStructures(pc);
         for (const KitItem& kit : kKit) {
             if ((kit.material && materials) || (kit.starter && backpack)) continue;
             if (tutorial && (kit.material || kit.starter)) continue;
@@ -550,6 +598,11 @@ bool Setup(uintptr_t pc, uintptr_t pawn) {
         }
         if (game::g_on.cheats && !tutorial) {
             if (uintptr_t bluGlo = engine::Load(kBluGlo)) AddItem(pc, bluGlo, kBluGloCount, -1, 0);
+            for (const wchar_t* path : kAmmo) {
+                uintptr_t ammo = engine::Load(path);
+                int have = ammo ? CountItems(pc, ammo) : kAmmoTopUp;
+                if (have < kAmmoTopUp) AddItem(pc, ammo, kAmmoTopUp - have, -1, 0);
+            }
             At<uint8_t>(pc, PcBuildFreeBits) |= 2;
             At<uint8_t>(pc, PcInfiniteAmmoBits) |= 1;
             if (uintptr_t cheats = At<uint32_t>(pc, PcCheatManager)) At<uint32_t>(cheats, CheatManagerFlags) |= CheatInfiniteStamina;
@@ -557,19 +610,28 @@ bool Setup(uintptr_t pc, uintptr_t pawn) {
         engine::TArray& instances = At<engine::TArray>(inventory, InventoryInstances);
         LOG("player: the inventory has %d items%s", instances.num,
             tutorial ? " (the tutorial: from nothing)"
-                     : game::g_on.cheats ? " (with 100 BluGlo, free building, infinite ammo and stamina)" : "");
+                     : game::g_on.cheats ? " (with 100 BluGlo, every kind of ammo, free building, infinite ammo and stamina)" : "");
     }
     // bHasInitializedWorldInventory stays false on purpose: the world manager would start saving profiles to MCP.
+    part("inventory");
     Refresh(pc);
+    part("HUD");
     EnsureTeam(pc);
     ApplyHero(pc, pawn);
+    part("hero");
     EquipFirstWeapon(pc, pawn);
+    part("weapon");
     Abilities(pawn, true);  // the 2 abilities a zone pawn starts with are none of these
+    part("abilities");
     // Base stats before the hero's passive effects: an effect's aggregator keeps the value it finds as the base, so
     // stamina 0 plus a perk's +5 would stay at 5 (no sprint).
     Stats(pc, pawn);
+    part("stats");
     loadout::Grant(pc, pawn, firstSetup);
+    part("trait kits");
     loadout::ApplyStats(pc, pawn);
+    part("hero stats");
+    LOG("player: set up (ms: %s)", parts.c_str());
     // The Zone controller's OnRep marks the player state loaded (the loading screen waits for it) and switches to
     // game-only input.
     if (At<uint8_t>(pc, PcClientLoaded) && At<uint8_t>(pc, PcServerLoaded))
@@ -609,6 +671,17 @@ uintptr_t Receive(uintptr_t pc, uintptr_t definition, int count) {
     uintptr_t item = AddItem(pc, definition, count, slot >= 0 ? 0 : -1, slot);
     Refresh(pc);
     return item;
+}
+
+RefreshOnce::RefreshOnce() {
+    g_refreshHeld++;
+}
+
+RefreshOnce::~RefreshOnce() {
+    if (--g_refreshHeld || !g_refreshPending) return;
+    uintptr_t pc = g_refreshPending;
+    g_refreshPending = 0;
+    Refresh(pc);
 }
 
 // `equip <name part>`: the local player's first item whose definition's name has the part, through
@@ -690,7 +763,16 @@ void OnExecuteItem(uintptr_t pc, const void* guid) {
         uintptr_t item = At<uint32_t>(instances.data, i * 4);
         if (item && memcmp(reinterpret_cast<const void*>(item + ItemEntry + EntryGuid), guid, 16) == 0) {
             uintptr_t definition = At<uint32_t>(item, ItemEntry + EntryDefinition);
-            if (engine::IsA(definition, "FortWeaponItemDefinition")) Equip(pawn, definition, guid);
+            if (engine::IsA(definition, "FortWeaponItemDefinition")) {
+                Equip(pawn, definition, guid);
+            } else if (engine::IsA(definition, "FortGadgetItemDefinition")) {
+                // A gadget that is placed (the teleporter): the server took out its placement tool, its deco item's
+                // weapon, for the gadget's item; placing then runs the gadget's ability, which spawns the deco with the
+                // tool's spawn parameters (GA_Teleporter ended at once without the tool in hand).
+                uintptr_t deco = At<uint32_t>(definition, GadgetDecoItem);
+                if (engine::IsA(deco, "FortDecoItemDefinition"))
+                    LOG("player: %s takes out %s", engine::Name(definition).c_str(), engine::Describe(Equip(pawn, deco, guid)).c_str());
+            }
             return;
         }
     }
@@ -846,6 +928,41 @@ uintptr_t GiveItem(uintptr_t pc, uintptr_t definition, int count, int quickbar, 
     return item;
 }
 
+// An outpost structure (UFortOutpostItemDefinition: the storm shield, harvesting optimizer...) is an item in the world
+// inventory whose entry Level is the structure's level; AFortPlayerControllerOutpost::GetStructureLevel reads it there.
+int StructureLevel(uintptr_t pc, uintptr_t definition) {
+    uintptr_t inventory = At<uint32_t>(pc, PcWorldInventory);
+    if (!inventory) return 0;
+    engine::TArray& instances = At<engine::TArray>(inventory, InventoryInstances);
+    for (int32_t i = 0; instances.data && i < instances.num; i++) {
+        uintptr_t item = At<uint32_t>(instances.data, i * 4);
+        if (item && At<uint32_t>(item, ItemEntry + EntryDefinition) == definition) return At<int32_t>(item, ItemEntry + EntryLevel);
+    }
+    return 0;
+}
+
+void SetStructureLevel(uintptr_t pc, uintptr_t definition, int level) {
+    uintptr_t inventory = At<uint32_t>(pc, PcWorldInventory);
+    if (!inventory) return;
+    engine::TArray& instances = At<engine::TArray>(inventory, InventoryInstances);
+    uintptr_t item = 0;
+    for (int32_t i = 0; instances.data && i < instances.num && !item; i++) {
+        uintptr_t candidate = At<uint32_t>(instances.data, i * 4);
+        if (candidate && At<uint32_t>(candidate, ItemEntry + EntryDefinition) == definition) item = candidate;
+    }
+    if (!item) item = GiveItem(pc, definition, 1, -1, 0, false);
+    if (!item) return;
+    At<int32_t>(item, ItemEntry + EntryLevel) = level;
+    engine::TArray& entries = At<engine::TArray>(inventory, InventoryEntries);
+    for (int32_t e = 0; entries.data && e < entries.num; e++) {
+        uintptr_t entry = entries.data + static_cast<uintptr_t>(e) * EntrySize;
+        if (SameGuid(entry, reinterpret_cast<const void*>(item + ItemEntry + EntryGuid))) {
+            At<int32_t>(entry, EntryLevel) = level;
+            MarkEntryDirty(inventory, entry);
+        }
+    }
+}
+
 bool GrantAbility(uintptr_t pawn, uintptr_t abilityClass) {
     return GrantAbilityClasses(pawn, &abilityClass, 1) == 1;
 }
@@ -871,6 +988,26 @@ std::string StatLine(uintptr_t pc, uintptr_t pawn) {
 // only when ABuildingSMActor::CanBeEdited (vtable +0x47C) agrees: an EditModeSupport made from the blueprint's
 // EditModePatternData, bIsPlayerBuildable, no build animation playing, nobody editing it and nothing blocking it. The
 // server then equips the edit tool found in the inventory by the game data's definition (UFortGameData +0x994).
+// `feedback <event>`: plays a UI feedback event (PlayerUIFeedback) on this copy's player the way the game does
+// (008804F0) and logs what it depends on: the controller being local, the bank, the event's sound, a sound component.
+void TestFeedback(const std::string& event) {
+    uintptr_t pc = engine::LocalPlayerController();
+    if (!pc) return;
+    int32_t name[2] = {};
+    reinterpret_cast<void(__thiscall*)(int32_t*, const char*, int, int)>(engine::Va(0x00D0AB40))(name, event.c_str(), 1, 1);
+    bool local = reinterpret_cast<bool(__thiscall*)(uintptr_t)>(At<uint32_t>(At<uint32_t>(pc, 0), 0x300))(pc);
+    uintptr_t gameData = reinterpret_cast<uintptr_t(__cdecl*)()>(engine::Va(0x006F1640))();
+    uintptr_t bank = gameData ? reinterpret_cast<uintptr_t(__cdecl*)(uintptr_t, int)>(engine::Va(0x0083C0F0))(gameData + 0x91C, 1) : 0;
+    uintptr_t entry = bank ? reinterpret_cast<uintptr_t(__thiscall*)(uintptr_t, int32_t, int32_t)>(engine::Va(0x00894D20))(bank, name[0], name[1]) : 0;
+    uintptr_t root = At<uint32_t>(pc, 0x114);
+    int32_t before = root ? At<int32_t>(root, 0x90 + 4) : -1;
+    reinterpret_cast<void(__thiscall*)(uintptr_t, int32_t, int32_t)>(engine::Va(0x008804F0))(pc, name[0], name[1]);
+    int32_t after = root ? At<int32_t>(root, 0x90 + 4) : -1;
+    LOG("player: feedback %s (name %d): local %d, game data %s, bank %s, entry %08X sound %s, components on the controller %d -> %d",
+        event.c_str(), name[0], local, engine::Describe(gameData).c_str(), engine::Describe(bank).c_str(), static_cast<unsigned>(entry),
+        entry ? engine::Describe(At<uint32_t>(entry, 8)).c_str() : "-", before, after);
+}
+
 void EditCheck() {
     uintptr_t pc = engine::LocalPlayerController(), pawn = engine::PawnOf(pc);
     float at[3];
@@ -986,17 +1123,14 @@ int RemoveItem(uintptr_t pc, const void* guid, int count, uintptr_t* definition)
     return 0;
 }
 
-// A dropped item lands as a normal pickup (AFortPickup, tossed from the pawn the way the game's own drops are).
-bool SpawnPickup(uintptr_t pc, uintptr_t definition, int count) {
-    uintptr_t pawn = engine::PawnOf(pc);
-    float at[3];
-    if (!engine::IsA(definition, "FortWorldItemDefinition") || !pawn || !engine::Location(pawn, at)) return false;
-    uintptr_t pickup = engine::SpawnActor(engine::FindClass("/Script/FortniteGame.FortPickup"), pc);
-    if (!pickup) return false;
-    engine::Teleport(pickup, at);  // spawned at the origin: the toss starts from where the actor is
+uintptr_t SpawnPickupAt(uintptr_t definition, int count, const float* from, const float* to, uintptr_t pawn, uintptr_t owner) {
+    if (!engine::IsA(definition, "FortWorldItemDefinition") || count <= 0) return 0;
+    uintptr_t pickup = engine::SpawnActor(engine::FindClass("/Script/FortniteGame.FortPickup"), owner);
+    if (!pickup) return 0;
+    engine::Teleport(pickup, from);  // spawned at the origin: the toss starts from where the actor is
     uintptr_t item = 0;
     Call(definition, "/Script/FortniteGame.FortItemDefinition.CreateTemporaryItemInstanceBP", &item);
-    if (!item) return false;
+    if (!item) return 0;
     uint8_t* entry = reinterpret_cast<uint8_t*>(pickup + PickupEntry);
     memcpy(entry, reinterpret_cast<const void*>(item + ItemEntry), EntrySize);
     for (int member : kEntryHeapMembers) memset(entry + member, 0, 12);
@@ -1006,9 +1140,18 @@ bool SpawnPickup(uintptr_t pc, uintptr_t definition, int count) {
         float location[3];
         uintptr_t owner;
         int32_t overrideMaxStack;
-    } toss{ { at[0], at[1], at[2] - 80.0f }, pawn, 0 };
+    } toss{ { to[0], to[1], to[2] }, pawn, 0 };
     Call(pickup, "/Script/FortniteGame.FortPickup.TossPickup", &toss);
-    return true;
+    return pickup;
+}
+
+// A dropped item lands as a normal pickup (AFortPickup, tossed from the pawn the way the game's own drops are).
+bool SpawnPickup(uintptr_t pc, uintptr_t definition, int count) {
+    uintptr_t pawn = engine::PawnOf(pc);
+    float at[3];
+    if (!pawn || !engine::Location(pawn, at)) return false;
+    float feet[3] = { at[0], at[1], at[2] - 80.0f };
+    return SpawnPickupAt(definition, count, at, feet, pawn, pc) != 0;
 }
 
 }  // namespace player

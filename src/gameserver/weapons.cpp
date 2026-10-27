@@ -2,6 +2,7 @@
 #include "log.h"
 #include "mission.h"
 #include <windows.h>
+#include <cmath>
 
 namespace weapons {
 
@@ -40,7 +41,32 @@ void __fastcall PlayReloadFX(uintptr_t weapon, void*, uint32_t stage) {
     engine::ProcessEvent(statics, engine::FindFunction("/Script/Engine.GameplayStatics.PlaySound2D"), &p);
     reinterpret_cast<void(__thiscall*)(uintptr_t, uint32_t)>(engine::Va(kOnPlayReloadFX))(weapon, stage);
 }
+
+// Tracers (and the shot's start) come from the weapon's GetMuzzleLocation. B_Ranged_Generic overrides it: for the
+// local player in a first-person camera, or aiming a scoped weapon (bIsTargeting && UseScopeTargeting), it returns a
+// point under the camera (PlayerCameraManager.TransformComponent + ScopeTargetingMuzzleOffset, 40 units down), right
+// for a first-person or scope view. The view stays third-person here, the camera over the shoulder, so those tracers
+// came from behind the player. An answer that far from the gun's own muzzle socket (the native implementation,
+// 008F27D0: the weapon mesh's muzzle socket) is replaced by the socket; a real first-person view stays as it is.
+constexpr uint32_t kMuzzleSocketLocation = 0x008F27D0;  // thiscall (weapon, FVector* out), ret 4
+constexpr float kCameraMuzzleRange = 150.0f;
 }  // namespace
+
+void AfterMuzzleLocation(uintptr_t weapon, float* location) {
+    if (!engine::IsA(weapon, "FortWeaponRanged")) return;
+    float socket[3] = {};
+    reinterpret_cast<void(__thiscall*)(uintptr_t, float*)>(engine::Va(kMuzzleSocketLocation))(weapon, socket);
+    if (socket[0] == 0.0f && socket[1] == 0.0f && socket[2] == 0.0f) return;  // no weapon mesh
+    float dx = location[0] - socket[0], dy = location[1] - socket[1], dz = location[2] - socket[2];
+    if (dx * dx + dy * dy + dz * dz <= kCameraMuzzleRange * kCameraMuzzleRange) return;
+    static int logged = 0;
+    if (logged < 3) {
+        logged++;
+        LOG("weapons: %s's muzzle was taken from the camera (%.0f units off); the gun's muzzle socket instead",
+            engine::Name(weapon).c_str(), std::sqrt(dx * dx + dy * dy + dz * dz));
+    }
+    for (int k = 0; k < 3; k++) location[k] = socket[k];
+}
 
 bool Install() {
     int done = 0;

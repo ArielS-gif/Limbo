@@ -478,7 +478,177 @@ Available"), other missions, co-op.
   permitted. The world manager has the backend validate the zone's mission or the zone never loads ("LoadZoneWorld
   Failed"), so a mission of that theater goes along. Console: `outpost [1-4]`. What is built there isn't kept
   between visits (the outpost's world record isn't saved).
+- **The storm shield core is white:** its mesh (TheOutpost/Meshes/SM_Outpost_Core) is painted with
+  IceRink/M_Board_White, so the white is this build's prototype art.
+- **The outpost's own classes:** the outpost game mode (TheOutpost/Blueprints/BP_GameModeOutpost) derives from
+  FortniteServer.FortGameModeOutpost, which isn't in the client, but FortGameStateOutpost, BP_PlayerControllerOutpost
+  (FortPlayerControllerOutpost) and FortPlayerStateOutpost are; game.cpp gives them to the plain FortGameMode for a zone
+  whose id names a BP_ZT_TheOutpost theme. Mission_OutpostSetup then gets past its first text step.
+- **Owning it:** BP_StormShield_Core's BlueprintCanInteract casts the pawn's controller to FortPlayerControllerOutpost
+  and asks IsOutpostOwner (008A3CB0): true in standalone, else the player state's bIsWorldDataOwner (+0x2B4 bit 0,
+  bit 1 is bIsGameSessionOwner), which the outpost game mode would set. player.cpp sets it (and
+  FortPlayerStateOutpost.bCanEditOutpost, +0x760) on the host's own player in an outpost; then the core says yes.
+  Its blueprint builds the core (bBuilt, HandleMissionEvent_BuildCore), has it defended (bDefended), and opens the
+  outpost menu (UI/Outpost/Outpost_MainWidget: storage, crafting table, fabricator, harvesting optimizer). The four
+  BP_Outpost_ControlPanel around it: `if (CoreReference.bDefended) return CanInteract; return false` (bytecode read
+  from UStruct::Script, +0x30), so they open after the defense. Not played through yet.
+- No roaming husks, director patrols or chest guardians in an outpost (`game::Outpost()`).
+- **Deploying the core:** its BlueprintCanInteract is owner && !bDefended && its own CanInteract; BlueprintOnInteract
+  (ubergraph 0x21D6) on an unbuilt core: CanBuild, CanInteract = false, BuildingOutpostStormshieldUpgrade.Build(pc),
+  which only marks the build pending (+0x952) and calls the controller's UpgradeStructure (ServerUpgradeStructure);
+  the server's answer set bBuilt. Build's call in its exec thunk (00A21F33 -> 006828E0) now builds at once through
+  EmergencySetBuildFlag(true) (006886A0), and the mission's step in progress succeeds (objectives::SucceedInProgress).
+- **Mission events:** Mission_OutpostSetup moves on in HandleMissionEvent_ObjectiveSucceeded(MissionGuid,
+  ObjectiveHandle, ...), matching the handle tags against DeployCoreObjectiveHandle, ActivateObjectiveHandle,
+  DefenseWavesHandle, BreatherHandle, ActivateLeg2..6; the server's mission manager sent it for every succeeded
+  objective. objectives.cpp's Stop now does too, for every mission class that has the event (the outpost,
+  Mission_DeliverGoods, Mission_StormShield, Mission_RepairRadar, Mission_BluGloSiphon; not Mission_Gates).
+- Blueprint bytecode was read from memory (UStruct::Script) and decoded with scratchpad kismet.js: object and
+  property pointers 8 bytes (upper half FFFFFFFF), FScriptName 12 bytes, jump offsets 4.
+- **Activate to defend:** after the deploy the mission starts a KillDestroyPickupInteract step with
+  ActivateObjectiveHandle, turns the core's prompt off and was to turn it back on (EnableInteract, the core's
+  CanInteract = true) 10 s later, which never came; using the core only ran its blueprint. objectives.cpp: every second
+  in an outpost the built, undefended core gets EnableInteract while that step runs, and using it (its
+  BlueprintOnInteract, an event in game.cpp) succeeds the step. Tried live: the mission then starts
+  GenericObjective_Defense_C_0 and sets bOutpostDefenseActive.
+- **Its structures:** the mission works on BP_StormShieldCore, BP_StormShieldAmp_1-5, Console1-4 (the control
+  panels), Fabricator, HarvestingOptimizer, CraftingTable and StorageVault, which the server's mission generator filled
+  in. objectives::LinkOutpost fills them from the live actors of each class (one pass over GObjects: a scan per class
+  froze the game for 7 s).
+- **The defense waves:** GenericObjective_Defense_C.StartObjective calls
+  StartMissionAIEncounterFromGeneratedProfile(CurrentDefenseNum, the core). Its implementation (00786590) reads the
+  mission's GeneratedMissionOptions (+0x368, FortGeneratedDifficultyOptions).GeneratedEncounterProfiles (+0x390,
+  FortGeneratedEncounterProfile, 0x38 each), which the generator sized from MissionInfo.EncounterProfiles (+0x1E0, 5 in
+  MissionInfo_Outpost_PvE_01); here it was empty, so no encounter, no countdown, no end. LinkOutpost adds one entry per
+  MissionInfo profile (its index and type tags, difficulty 0). When a defense starts, the difficulty differs, so the
+  engine regenerates that entry itself (00788760 -> FortMissionInfo 007888A0: points, encounter options) - only with
+  FortGlobals.bEnableNewEncounters on, so director::UseOldEncounters keeps it off for the gates only. The encounter
+  (BaseGateEncounter_C) then sends its husks, and the defense runs its 120 s; the director sends husks at the core
+  (objectives::OutpostCore, where the Atlas would be) and at players close by. Tried: the first defense succeeds, the
+  mission succeeds, the zone ends in victory and the backend completes outpostquest_t1_l1.
+- **The supply crate** (B_SupplyTeleport_C, after the deploy): opening it (or 24 s after it lands) runs SpawnLoot, which
+  drops wood, stone and metal, nuts and bolts, ore, twine and traps by its SupplyLevel with
+  FortKismetLibrary.K2_SpawnPickupInWorld. That implementation (01372E50) is a bare ret here; its exec thunk's call
+  (00A411E1) now spawns the pickups (gameplay.cpp, player::SpawnPickupAt), for every blueprint that drops items so.
+- **Later visits:** with leg 1 done the mission finds no outpost quest of the player's (the follow-ups come first) and
+  starts NoCurrentOutpostQuest (Ray: "check the control panel"). It then expects the core built and defended, as the
+  server rebuilt it from the player's saved structures (GetStructureLevel finds none here): only then does it send
+  EnableControlPanels. objectives::OutpostTick builds and defends the core (leg 1) and amplifiers 1-4 (legs 2-5) once
+  the mission's HasCompletedLegN says so (EmergencySetBuildFlag, WasDefended). The panels then open the outpost menu
+  (Outpost_MainWidget, "Welcome to your Outpost"). A deploy step that starts after the core already stands succeeds.
+- Fortify-Alpha completed outpostquest_t1_l1 along with the homebase tutorial (its outposts couldn't load); that's
+  gone, and a won outpost (mission/end's `outpost`: N, from Zone_Outpost_PvE_0N) completes the player's open
+  outpostquest_tN_l* in the backend.
+- Quick Match, the hex in the middle of the map (BP_Hex_CriticalMission_C, "P_QuickplaySmoke", no mission data),
+  starts with FortMatchmakingContext.StartCriticalMission(min, max power), a server search ("No Matches Available").
+  Its exec thunk's call to the implementation (00A5C54C -> 007F0880) is pointed at lobby.cpp: a selected mission
+  tile opens like Start Mission, else a random mission tile of the theater on the map (not the power range yet).
 - Tests: `tools/mission-run.sh Onboarding_Fort Onboarding`, `tools/mission-run.sh TheOutpost_PvE_01 Outpost1`.
+
+### Debug lines and the craft hitch (2026-10-27)
+
+- The red boxes left in the city zones came from the game's C++, not the blueprint DrawDebugBox already left out:
+  the engine's own DrawDebug* (17 cdecl functions 0168CAA0-0169EC20, each opening with GEngine->GetNetMode) return at
+  their first byte now (fixes.cpp), as in a shipped build (ENABLE_DRAW_DEBUG 0).
+- A finished craft took each material out and added the result with a full HUD refresh each time (13 ms with the
+  inventory closed, far more with it open, where crafting happens): `player::RefreshOnce` holds them to one refresh.
+
+### Power level and the Play tab's locks (2026-10-27)
+
+- **Power level** is the homebase rating: each building's rating (FortHomebaseSet `<Building>_Rating`, from its level
+  and the workers in its 6 slots and manager slot) added up. `console DumpHomebaseRatingInfo` prints it all in
+  FortniteGame.log. Buildings top out at level 5; every building the UI shows at level 5 (backend
+  `src/util/homebase.js`, at sign-up and every login) is 227: thirteen buildings at 17, the Manor 5, the Keep 1.
+  Workers top out at level 5 too (WorkerBasic_T05 24, a T05 manager in its own building 58), about 2850 in all.
+  The homebase tutorial builds the Military HQ or the Tech Lab, so those two wait until its step is done.
+- **The locks:** a mission's required power is GameDifficultyGrowthBounds' RequiredRating for its difficulty row:
+  TheaterStartZone1-5 0/5/10/15/30, TheaterNormalZone1-5 35/80/155/320/495, TheaterHardZone1-5 610-1200,
+  TheaterNightmareZone1-5 1535/2370/3615/6160/10715 (the Outpost rows the same ranges). world_info (a later build)
+  names Canny Valley's and Twine Peaks' rows Theater_Hard_ZoneN/Theater_Nightmare_ZoneN, which this client doesn't have.
+- FortTheaterMapTile.IsTileLocked/IsTilePlayable (0x8D2680/0x8D2740) ask the player controller's IsRequirementsMet
+  (vtable +0xA3C). FortPlayerControllerFrontEnd's (0x8D2340) says yes to everything when its bUnlockAllZones (+0xC64)
+  is set; lobby.cpp sets it on every frontend controller, so every tile and Start Mission is open
+  (`call pc /Script/FortniteGame.FortPlayerController.IsRequirementsMet i:10715 ...`: 01 with it, 00 without).
+  The backend also clears the tiles' own requirements (5 tiles waited on outpost quests).
+
+### Shotgun shells, edit sounds (2026-10-27, night)
+
+- **A shotgun held 1 shell:** infinite ammo uses none up, but a shotgun's shell-by-shell reload stops when the
+  inventory has no shells, and the kit gave only medium bullets: it loaded the one shell and stopped. With cheats on,
+  every ammo kind (light, medium, heavy, shells, energy) is now topped up to 500 at setup; an emptied pump shotgun
+  reloads to 8. A new one still comes with 1 loaded until its first reload.
+- **Building and editing sounds** (choosing a piece or material, rotating, edit mode and its tiles, can't build) are
+  UI feedback events (PlayerUIFeedback: BuildSelectWood, BuildPreviewRotate, BuildPreviewEditEnter/Tile/Exit, ...),
+  played by 008804F0 on the local controller through GameplayStatics.SpawnSoundAttached(sound, the controller's root)
+  (016C3730, called at 00880615). Their cues attenuate and spatialize (bAttenuate, bSpatialize). The controller's
+  root is attached to the camera manager in name only: it stays where it was put when the zone started (its relative
+  location is that spot; SetAbsolute changes nothing), so the farther the player went, the quieter these got, to
+  nothing; placing sounds play at the building and were heard. The call is pointed at gameplay.cpp's FeedbackSound,
+  which attaches them to the camera manager's root (at the camera). Checked: the sound component now hangs off the
+  camera. ClientTriggerUIFeedbackEvent does nothing on the host (its implementation skips Role 3), but only
+  008804F0's non-local branch sends it. `feedback <event>` plays one and logs what it depends on.
+- **The teleporter gadget** (G_Teleporter, a lobby gadget) is placed: its DecoItemDefinition D_Teleporter (pads
+  B_Teleporter, preview B_Placement_Teleporter) comes out as a placement tool, and placing runs GA_Teleporter, which
+  needs the tool in hand (FortAbilityDecoTool), spawns the pad with its spawn parameters (AbilitySpawnDeco) and a
+  second one 220 units toward the player (GetSecondTeleporterSpawnLoc's SpawnDistance). player::OnExecuteItem only
+  equipped weapons, so the ability ended at once. A gadget with a deco item now equips that deco item's tool for
+  the gadget's item. Tried: both pads come, and stepping on one puts the player on the other. `gadget <G_Name>`
+  gives a lobby gadget.
+- **Guns and buildings:** RangedWeapons gives environment damage (EnvDmgPB/Mid/Long) to only 4 of ~275 rows: the
+  troll launcher (2), the proximity mine (1) and a test weapon. By design guns don't hurt buildings, and here they
+  don't: a wall kept 200/200 after 16 rifle hits. (Its health bar showed 100 the whole time.)
+- **Outpost structures and Build** (not yet tried in a zone): a structure (UFortOutpostItemDefinition: Outpost_StormShield,
+  _HarvestingOptimizer, _StorageVault, _CraftingTable, _Fabricator, _POST) is an item in the world inventory whose
+  entry Level (+0x18) is its level; GetStructureLevel and GetStormShieldLevelDefended (the storm shield, less one
+  until its defense is won) read it there, and the server put them there from the saved outpost. With none, the
+  outpost was level 0 and every upgrade asked for "Outpost level 1". The backend now keeps the levels (profile0 stats
+  limbo_outposts) and sends "structure <outpost> <asset> <level>" lines (the storm shield at least one level per
+  outpost quest won); loadout::GiveOutpostStructures gives them at setup. Build: UpgradeStructure (008B0D20) marks
+  the upgrade pending and asks the server only from a client; its calls at 00839A00 and 00A61473 now go through
+  gameplay.cpp, which on the host takes GetUpgradeStructureCost's world items, raises the level, calls
+  ClientOnStructureLevelChanged and posts /ot65/outpost/upgrade (the backend keeps the level and takes the account
+  items, AccountResource.<asset>). The backpack save leaves the structures out.
+- **Leave with Party** (Outpost_MainWidget.LeavePartyAndGame) only calls FortPartyContext.LeaveParty; in a zone that
+  now goes back to the lobby (lobby.cpp ExecLeaveParty, then endzone::RequestLeave on the next tick).
+- Gadgets in an outpost: the game refuses them outside a defense by design ("Attempted to use gadget %s while outpost
+  defense is not active!").
+- ClientMessage text is logged with the calls (`watch ClientMessage`): the debug `build` is refused with
+  "Cannot place due to obstacle!" where something stands in the way.
+- The game's log reports GET_FallingDamage's SetByCaller EnvironmentDamage as unset on each fall (the DLL applies
+  the effect with BP_ApplyGameplayEffectToSelf and its damage override); left as it is.
+
+### Stability and performance (2026-10-28)
+
+- **Slow ticks are logged:** the DLL's tick (every 200 ms) is timed by steps; one over 4 ms is logged with its
+  slowest step ("game: a slow tick, 77.4 ms (the AI director: 77.4 ms)"), at most every 10 s. The player's setup logs
+  its parts in one line, and each husk group out on the map its search and queueing time.
+- **Object scans:** FindAllA, FindFirstA and FindFirstOfClass decided per object, building class names up the
+  hierarchy each time (most of a second for one scan of ~300,000 objects). They now decide once per class
+  (engine.cpp Scan). The hero lookup at setup went from 820 to under 300 ms; the lobby's Play and Quick Match tile
+  lookups use the same scans. objectives::LinkOutpost uses one pass (FindAllOf) for all its classes: 7 s -> 30 ms.
+- **Husk groups out on the map:** a group of 3-5 was spawned in one tick, a 55-80 ms hitch every 20 s. The members are
+  queued and spawned one per tick (~4 ms each); their kinds are loaded at setup, under the loading screen, and the
+  navigation system's first query (some 80 ms of setup) is made at the mission's start instead of with the first group.
+- **Injected too early:** `Play Limbo.bat`'s injector injects as soon as the game process appears. Once the DLL
+  found the engine tables while only 2277 objects existed, before the game's own classes were registered:
+  FortMatchmakingContext.StartMatchmaking and FortKismetLibrary.GetAIDirector weren't found, the Play tab's hook stayed
+  out, and Enter Outpost went to the real server search ("No matches available", releasing the world lock, again and
+  again). The DLL now waits for those classes (dllmain.cpp, up to 60 s; 0.3 s in a reproduced early injection) before
+  installing anything but the chat-login patch.
+- **Tracers from behind the player:** tracers and the shot start at the weapon's GetMuzzleLocation, reached through
+  ProcessEvent (the wrapper 00930D90). B_Ranged_Generic overrides it: for the local player with
+  FortPlayerController.IsUsingFirstPersonCamera (+0x5D0; set by the EnableFirstPerson/DisableFirstPerson actions) or
+  aiming a weapon with UseScopeTargeting, it returns the camera manager's TransformComponent moved by
+  ScopeTargetingMuzzleOffset (0, 0, -40): a first-person or scope view's muzzle. The view stays third-person here, so
+  the point was the over-the-shoulder camera, behind the player. weapons::AfterMuzzleLocation (called by the hook after
+  the original) replaces an answer more than 150 units from the gun's muzzle socket (008F27D0, the native
+  implementation) with the socket. Not yet tried in a zone.
+- **Safe reads across threads:** mem::Readable's region cache could be extended (vector insert) by ProcessEvent on
+  another thread while the game thread searched it; it has a reader/writer lock now (SRWLOCK).
+- The player's setup (0.6-1.3 s, mostly the HUD, the hero and its stats) runs before the loading screen is released,
+  so it isn't seen.
+- Seen in the game's own log: entering an outpost from the map loads an "outpost view" (LoadOutpostView) whose JSON
+  lacks numberOfItemsInStorage and outpostStructures (two LogJson errors each time; it goes on).
 
 ## Co-op (2026-10-27): up to 4 players in one zone (`net.cpp`)
 

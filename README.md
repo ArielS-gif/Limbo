@@ -6,7 +6,7 @@ You need your own copy of the OT6.5 build. Limbo doesn't come with any game file
 
 ## What you can do
 
-- Play missions from the Play tab
+- Play any mission from the Play tab, with your homebase fully built
 - Play co-op with up to 4 people
 - Fight husks around the map
 - Chat with your friends
@@ -29,17 +29,18 @@ Get Limbo from the [Releases](https://github.com/ArielS-gif/Limbo/releases) page
 
 ### Hosting
 
-1. Install [Node.js](https://nodejs.org) and [MongoDB](https://www.mongodb.com/try/download/community)
-   (leave "Install MongoDB as a Service" ticked).
-2. Run `Play Limbo.bat`. The first time, it installs the backend's packages and sets it up with a new, empty database.
-3. Log in with any name and password, pick a mission and press Play.
+1. Run `Play Limbo.bat`. The first time, it installs [Node.js](https://nodejs.org) if you don't have it (Windows asks
+   for permission, click Yes) and sets up the backend.
+2. Log in with any name and password, pick a mission and press Play.
+
+Accounts are saved in `Limbo-Backend\data`. Delete that folder to start over.
 
 ### Joining a friend
 
 1. Get on the same network as them (same Wi-Fi, or Radmin VPN / Tailscale).
-2. Install [Node.js](https://nodejs.org).
-3. Put your friend's address in `Limbo\out\backend.txt`, like `26.12.34.56:3551`.
-4. Run `Play Limbo.bat`, log in, and press Play while they're starting a mission or already in one.
+2. Put your friend's address in `Limbo\out\backend.txt`, like `26.12.34.56:3551`.
+3. Run `Play Limbo.bat` (it installs Node.js the first time if you don't have it), log in, and press Play while
+   they're starting a mission or already in one.
 
 The host has to allow TCP ports 3551 and 5222 in the firewall, and whoever hosts a mission needs UDP 7777.
 

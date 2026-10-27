@@ -130,11 +130,16 @@ uintptr_t FindFunctionOn(uintptr_t cls, const char* name) {
 
 uintptr_t FindPropertyOn(uintptr_t cls, const char* name) {
     std::lock_guard<std::recursive_mutex> guard(Lock());
+    static std::map<std::pair<uintptr_t, std::string>, uintptr_t> found;
+    auto key = std::make_pair(cls, std::string(name));
+    auto it = found.find(key);
+    if (it != found.end()) return it->second;
     for (uintptr_t c = cls; c; c = mem::ReadOr<uint32_t>(c + ue::strct::Super)) {
         for (uintptr_t field = mem::ReadOr<uint32_t>(c + StructChildren); field;
              field = mem::ReadOr<uint32_t>(field + FieldNext)) {
             std::string type = ue::ClassName(field);
-            if (ue::ObjectName(field) == name && type.size() > 8 && type.compare(type.size() - 8, 8, "Property") == 0) return field;
+            if (ue::ObjectName(field) == name && type.size() > 8 && type.compare(type.size() - 8, 8, "Property") == 0)
+                return found[key] = field;
         }
     }
     return 0;
@@ -163,33 +168,62 @@ uintptr_t FindSubobject(uintptr_t outer, const char* className) {
     return 0;
 }
 
-uintptr_t FindFirstOfClass(const char* className) {
-    std::lock_guard<std::recursive_mutex> guard(Lock());
-    ue::Refresh();
-    for (int32_t i = 0; i < ue::g.numObjects; i++) {
-        uintptr_t object = ue::ObjectAt(i);
-        if (object && ue::ClassName(object) == className && ue::ObjectName(object).rfind("Default__", 0) != 0) return object;
-    }
-    return 0;
-}
-
-uintptr_t FindFirstA(const char* className) {
-    std::lock_guard<std::recursive_mutex> guard(Lock());
-    ue::Refresh();
-    for (int32_t i = 0; i < ue::g.numObjects; i++) {
-        uintptr_t object = ue::ObjectAt(i);
-        if (object && ue::IsA(object, className) && ue::ObjectName(object).rfind("Default__", 0) != 0) return object;
-    }
-    return 0;
-}
-
-std::vector<uintptr_t> FindAllA(const char* className) {
+namespace {
+// The live objects whose class matches, in GObjects order, up to `limit` (0: all). Whether a class matches is worked
+// out once per class (a scan meets a few thousand classes among some 300,000 objects; working it out per object built
+// class names up the hierarchy each time, and a scan took most of a second).
+std::vector<uintptr_t> Scan(const char* className, bool subclasses, size_t limit) {
     std::lock_guard<std::recursive_mutex> guard(Lock());
     ue::Refresh();
     std::vector<uintptr_t> found;
+    std::map<uintptr_t, bool> matches;  // class -> whether its objects count
     for (int32_t i = 0; i < ue::g.numObjects; i++) {
         uintptr_t object = ue::ObjectAt(i);
-        if (object && ue::IsA(object, className) && ue::ObjectName(object).rfind("Default__", 0) != 0) found.push_back(object);
+        if (!object) continue;
+        uintptr_t cls = mem::ReadOr<uint32_t>(object + ue::obj::Class);
+        auto it = matches.find(cls);
+        if (it == matches.end())
+            it = matches.emplace(cls, subclasses ? ue::IsA(object, className) : ue::ClassName(object) == className).first;
+        if (!it->second || ue::ObjectName(object).rfind("Default__", 0) == 0) continue;
+        found.push_back(object);
+        if (limit && found.size() >= limit) break;
+    }
+    return found;
+}
+}  // namespace
+
+uintptr_t FindFirstOfClass(const char* className) {
+    std::vector<uintptr_t> found = Scan(className, false, 1);
+    return found.empty() ? 0 : found[0];
+}
+
+uintptr_t FindFirstA(const char* className) {
+    std::vector<uintptr_t> found = Scan(className, true, 1);
+    return found.empty() ? 0 : found[0];
+}
+
+std::vector<uintptr_t> FindAllA(const char* className) {
+    return Scan(className, true, 0);
+}
+
+std::vector<std::vector<uintptr_t>> FindAllOf(const std::vector<std::string>& classNames) {
+    std::lock_guard<std::recursive_mutex> guard(Lock());
+    ue::Refresh();
+    std::vector<std::vector<uintptr_t>> found(classNames.size());
+    std::map<uintptr_t, int> kinds;  // a class seen: its index in classNames, -1 if none
+    for (int32_t i = 0; i < ue::g.numObjects; i++) {
+        uintptr_t object = ue::ObjectAt(i);
+        if (!object) continue;
+        uintptr_t cls = mem::ReadOr<uint32_t>(object + ue::obj::Class);
+        auto it = kinds.find(cls);
+        if (it == kinds.end()) {
+            std::string name = ue::ObjectName(cls);
+            int kind = -1;
+            for (size_t k = 0; k < classNames.size() && kind < 0; k++)
+                if (classNames[k] == name) kind = static_cast<int>(k);
+            it = kinds.emplace(cls, kind).first;
+        }
+        if (it->second >= 0 && ue::ObjectName(object).rfind("Default__", 0) != 0) found[it->second].push_back(object);
     }
     return found;
 }

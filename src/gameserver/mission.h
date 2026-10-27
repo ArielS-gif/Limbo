@@ -19,6 +19,8 @@ extern Switches g_on;
 // the harvest tool, building pieces and the edit tool only (no kit, backpack, profile materials or cheats), nothing is
 // saved from it (the real backpack stays as it was), no co-op, no roaming husks or chest guardians (it scripts its own).
 bool Tutorial();
+// An outpost (the storm shield bases): no roaming husks or chest guardians either; its defenses bring their own waves.
+bool Outpost();
 }  // namespace game
 
 // Co-op: this client hosts its zone for other copies of the game (net.cpp), or joins one as a plain client.
@@ -76,6 +78,13 @@ bool Install();       // objective and mission vtable entries (startup)
 bool PatchDeposit();  // the call in K2_RemoveItemFromPlayer (game thread)
 void List();          // logs the missions and their objectives (under the lock)
 void ForceSuccess();  // sets every live mission to Succeeded
+// The objectives in progress of a mission of that class succeed (the outpost's deploy step, once its storm shield is
+// built here instead of by the server).
+void SucceedInProgress(const char* missionClass);
+void LinkOutpost();                            // the outpost mission's references to its structures (core, panels..)
+void OutpostTick();                            // the activate step: the built core's prompt on (every second)
+void OnStormshieldUsed(uintptr_t structure);  // the activate step succeeds when the built core is used
+uintptr_t OutpostCore();                       // the outpost mission's storm shield core, or 0 (the husks' goal there)
 }
 
 namespace director {
@@ -89,9 +98,11 @@ bool Ready();             // the director got WorldReady: its encounter timer ru
 void StartAmbient();      // the husks outside the objective: roaming patrols and the chests' guardians (once ready)
 void UpdateGoals();       // gives each husk its goal: the player when close, else the Atlas (throttled; every tick)
 void UpdateRoamers(bool active);  // husk groups out on the map while the zone runs (active: the mission is loaded)
+void WarmNavigation();            // the navigation system's first query, at the mission's start
+void PreloadRoamers();            // their kinds' classes, while the loading screen is up (a load mid-game was a hitch)
 void ListHusks();         // logs the husks, their goals and distances
 void SpawnHusk(const std::string& arg);  // "<type> [count]" in front of the player; no type lists the types
-void UseOldEncounters();  // FortGlobals.bEnableNewEncounters = false
+void UseOldEncounters(bool old);  // FortGlobals.bEnableNewEncounters = !old
 bool ExpandNavigation();  // sizes the zone's navigation bounds; the navmesh then builds in the background
 int NavigationPending();  // bounds updates, dirty areas and tiles still to build; -1 without a navigation system
 }
@@ -110,6 +121,10 @@ bool GiveBackpack(uintptr_t pc);               // what the player carried out of
 void Save(uintptr_t pc, bool autosave = false);  // the backpack and the materials used or gathered go back
 void AutoSave(uintptr_t pc, uint64_t now);     // every minute in a zone (closing the game never saves)
 void Grant(uintptr_t pc, uintptr_t pawn, bool items);  // the unlocked trait kits (and their items on the first setup)
+void GiveOutpostStructures(uintptr_t pc);       // in an outpost: its structures at their saved levels
+// An outpost structure upgraded here: the new level is kept (the backend), and the account items it cost are paid there.
+void SaveStructure(uintptr_t pc, uintptr_t structure, int level, const std::vector<std::pair<std::string, int>>& accountItems);
+void GiveLobbyGadget(const std::string& name);  // `gadget <G_Name>`: a gadget as if picked in the lobby (tests)
 void ApplyStats(uintptr_t pc, uintptr_t pawn);  // the hero card's stats: health, shield, damage (once per ability system)
 }
 
@@ -126,6 +141,7 @@ void PatchCallSites();  // the environment damage helper's callers (game thread)
 
 namespace weapons {
 bool Install();  // the weapons' reload/equip FX slot: the local player's sounds play where they can be heard (startup)
+void AfterMuzzleLocation(uintptr_t weapon, float* location);  // GetMuzzleLocation's answer: the gun's muzzle in a third-person view
 }
 
 // The lobby's Play tab: missions chosen there open here (the backend's matchmaking answers no one).
@@ -160,6 +176,13 @@ int RemoveItems(uintptr_t pc, uintptr_t definition, int count);  // returns how 
 uintptr_t GiveItem(uintptr_t pc, uintptr_t definition, int count, int quickbar, int slot, bool refresh = true);
 uintptr_t Receive(uintptr_t pc, uintptr_t definition, int count);  // like a pickup: a weapon takes the next free slot
 int CountItems(uintptr_t pc, uintptr_t definition);                // how many the world inventory holds
+int StructureLevel(uintptr_t pc, uintptr_t definition);            // an outpost structure item's level, 0 if none
+void SetStructureLevel(uintptr_t pc, uintptr_t definition, int level);  // the structure item, given if missing
+// While one exists, inventory changes don't refresh the HUD; it is refreshed once when the last one goes (a craft).
+struct RefreshOnce {
+    RefreshOnce();
+    ~RefreshOnce();
+};
 struct HeldItem {
     uintptr_t definition;
     int count;
@@ -171,6 +194,8 @@ bool ExecuteByName(uintptr_t pc, const std::string& part, bool drop = false);  /
 int RemoveItem(uintptr_t pc, const void* guid, int count, uintptr_t* definition);
 void AfterDrop(uintptr_t pc, uintptr_t definition, const void* guid);  // the dropped weapon leaves the hands (the pickaxe comes out)
 bool SpawnPickup(uintptr_t pc, uintptr_t definition, int count);  // tossed in front of the player's pawn
+// A pickup of `count` x `definition` spawned at `from` and tossed to `to` (pawn: the toss's owner, may be 0); 0 if none.
+uintptr_t SpawnPickupAt(uintptr_t definition, int count, const float* from, const float* to, uintptr_t pawn, uintptr_t owner);
 bool GrantAbility(uintptr_t pawn, uintptr_t abilityClass);  // one gameplay ability class, through the granting effect
 // Points the gadget's items at the pawn's spec of its granted ability, so the quickbar can fire it.
 bool LinkGadget(uintptr_t pc, uintptr_t pawn, uintptr_t gadget, uintptr_t abilityClass);
@@ -178,5 +203,6 @@ bool LinkGadget(uintptr_t pc, uintptr_t pawn, uintptr_t gadget, uintptr_t abilit
 bool SetAttribute(uintptr_t pawn, const char* setClass, const char* attribute, float value);
 std::string StatLine(uintptr_t pc, uintptr_t pawn);  // health, shield and the hero stats, for the log
 void FillHealth(uintptr_t pawn);                     // health and shield to their maximums
+void TestFeedback(const std::string& event);  // `feedback <event>`: a UI feedback event, with what it needs logged
 void EditCheck();  // `editcheck`: what keeps the building pieces near the player from being edited
 }

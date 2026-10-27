@@ -4,6 +4,16 @@ rem loaded into it as soon as it starts. Expects next to each other: "Fortnite (
 rem on the host's PC, the backend (Limbo-Backend). A friend playing on someone else's backend writes
 rem "<host address>:3551" into out\backend.txt: then no backend is started here and the patch pak points there.
 setlocal
+title Limbo
+echo.
+echo  ___       ___  _____ ______   ________  ________
+echo ^|\  \     ^|\  \^|\   _ \  _   \^|\   __  \^|\   __  \
+echo \ \  \    \ \  \ \  \\\__\ \  \ \  \^|\ /\ \  \^|\  \
+echo  \ \  \    \ \  \ \  \\^|__^| \  \ \   __  \ \  \\\  \
+echo   \ \  \____\ \  \ \  \    \ \  \ \  \^|\  \ \  \\\  \
+echo    \ \_______\ \__\ \__\    \ \__\ \_______\ \_______\
+echo     \^|_______^|\^|__^|\^|__^|     \^|__^|\^|_______^|\^|_______^|
+echo.
 set "LIMBO=%~dp0"
 for %%i in ("%LIMBO%..") do set "ROOT=%%~fi"
 set "GAME=%ROOT%\Fortnite (2252016-3240987)"
@@ -25,10 +35,11 @@ set "REMOTE=1"
 echo %ADDRESS%| findstr /b /i "127.0.0.1 localhost" >nul && set "REMOTE="
 
 if not exist "%PATCHPAK%" (
+  call :node || goto end
   echo Building the patch pak for %ADDRESS%...
   node "%LIMBO%tools\build-patch-pak.js" %ADDRESS%
   if not exist "%PATCHPAK%" (
-    echo Could not build the patch pak - is Node.js installed?
+    echo Could not build the patch pak - see the messages above.
     goto end
   )
 )
@@ -47,11 +58,14 @@ if not defined BACKEND (
   goto end
 )
 
-rem A freshly downloaded backend has no packages and no .env yet: install them and make a fresh one the first time.
-where node >nul 2>&1 || (
-  echo Node.js isn't installed - get it from https://nodejs.org and run this again.
+findstr /c:"\"mongoose\"" "%BACKEND%\package.json" >nul && (
+  echo This backend is an old version that needs MongoDB. Get the new Limbo-Backend.zip from
+  echo https://github.com/ArielS-gif/Limbo-Backend/releases and put it in place of "%BACKEND%".
   goto end
 )
+
+rem A freshly downloaded backend has no packages and no .env yet: install them and make a fresh one the first time.
+call :node || goto end
 if not exist "%BACKEND%\node_modules\dotenv-safe" (
   echo Installing the backend's packages ^(first time only^)...
   pushd "%BACKEND%"
@@ -67,20 +81,11 @@ set "SECRET="
 for /f "usebackq delims=" %%s in (`node -p "require('crypto').randomBytes(32).toString('hex')"`) do set "SECRET=%%s"
 >"%BACKEND%\.env" (
   echo PORT=3551
-  echo MONGO_URI=mongodb://127.0.0.1:27017/limbo
   echo JWT_SECRET=%SECRET%
 )
-echo Made the backend's settings ^(.env^) with a new database called limbo.
+echo Made the backend's settings ^(.env^).
 :envready
 
-rem The backend starts even without MongoDB, but then nobody can log in.
-findstr /b /i /c:"MONGO_URI=mongodb://127.0.0.1" /c:"MONGO_URI=mongodb://localhost" "%BACKEND%\.env" >nul || goto startbackend
-netstat -an | findstr /r /c:":27017 .*LISTENING" >nul && goto startbackend
-echo MongoDB isn't running. Install MongoDB Community Server from https://www.mongodb.com/try/download/community
-echo ^(leave "Install MongoDB as a Service" ticked^), or start it, then run this again.
-goto end
-
-:startbackend
 echo Starting the backend...
 start "Limbo backend" cmd /k "cd /d "%BACKEND%" && node index.js"
 for /l %%i in (1,1,20) do (
@@ -102,3 +107,20 @@ rem Limbo goes in as soon as the game starts: chat logs in right after the game'
 
 :end
 pause
+exit /b
+
+rem Node.js runs the backend and builds the patch pak. Installs it with winget when it's missing.
+:node
+where node >nul 2>&1 && exit /b 0
+if exist "%ProgramFiles%\nodejs\node.exe" goto nodepath
+where winget >nul 2>&1 || goto nodemissing
+echo Installing Node.js ^(Windows may ask for permission - click Yes^)...
+winget install -e --id OpenJS.NodeJS.LTS --source winget --silent --accept-package-agreements --accept-source-agreements
+if not exist "%ProgramFiles%\nodejs\node.exe" goto nodemissing
+:nodepath
+rem Installed but not on this window's PATH yet (it was just installed).
+set "PATH=%ProgramFiles%\nodejs;%PATH%"
+exit /b 0
+:nodemissing
+echo Node.js isn't installed - get it from https://nodejs.org and run this again.
+exit /b 1

@@ -48,6 +48,20 @@ static uintptr_t __cdecl GetMcpWorldsHook(uintptr_t worldContext, const uint32_t
 // is pointed here: nothing is drawn, and the first box from each kind of object is logged with who asked.
 constexpr uint32_t kDrawDebugBoxCall = 0x01AF0276, kDrawDebugBox = 0x017278B0;
 
+// The game's C++ draws through the engine's own debug helpers too (the red boxes around building pieces in the city
+// zones): DrawDebugLine, DrawDebugBox, DrawDebugSphere and the rest, 17 cdecl functions from 0168CAA0 to 0169EC20, each
+// opening with GEngine->GetNetMode(World). A shipped game is built without them (ENABLE_DRAW_DEBUG 0), so nothing
+// depends on them; each one returns at its first instruction (mov ecx,[GEngine] = 8B, or push ebp = 55).
+const struct {
+    uint32_t va;
+    uint8_t first;
+} kDrawDebug[] = {
+    { 0x0168CAA0, 0x8B }, { 0x0168DF00, 0x8B }, { 0x0168E750, 0x55 }, { 0x01690E80, 0x8B }, { 0x01691660, 0x8B },
+    { 0x01691AA0, 0x55 }, { 0x01692610, 0x55 }, { 0x01692820, 0x55 }, { 0x01692B50, 0x8B }, { 0x016930B0, 0x55 },
+    { 0x01694710, 0x8B }, { 0x016947C0, 0x8B }, { 0x016948B0, 0x8B }, { 0x016949C0, 0x8B }, { 0x01694DE0, 0x8B },
+    { 0x01695330, 0x8B }, { 0x0169EC20, 0x8B },
+};
+
 static void __cdecl NoDebugBox(uintptr_t worldContext, float cx, float cy, float cz, float ex, float ey, float ez) {
     static std::set<uintptr_t> logged;
     uintptr_t cls = worldContext ? *reinterpret_cast<const uint32_t*>(worldContext + 0xC) : 0;
@@ -59,6 +73,9 @@ static void __cdecl NoDebugBox(uintptr_t worldContext, float cx, float cy, float
 bool Install() {
     bool boxes = engine::PatchCall(kDrawDebugBoxCall, kDrawDebugBox, reinterpret_cast<void*>(&NoDebugBox));
     LOG("fixes: blueprints' debug boxes %s", boxes ? "are not drawn" : "NOT patched (still drawn)");
+    int off = 0;
+    for (const auto& draw : kDrawDebug) off += engine::PatchByte(draw.va, draw.first, 0xC3) ? 1 : 0;
+    LOG("fixes: the engine's debug drawing is off (%d of %d functions)", off, static_cast<int>(sizeof(kDrawDebug) / sizeof(kDrawDebug[0])));
     if (!hook::Install(ue::g.exeBase + kGetMcpWorlds, kGetMcpWorldsStart, sizeof(kGetMcpWorldsStart),
                        reinterpret_cast<void*>(&GetMcpWorldsHook), reinterpret_cast<void**>(&g_getMcpWorlds))) {
         LOG("fixes: GetMcpWorlds hook NOT installed (unexpected bytes at exe+0x%X, or patching failed)", kGetMcpWorlds);

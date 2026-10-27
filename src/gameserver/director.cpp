@@ -2,6 +2,7 @@
 #include "log.h"
 #include "mission.h"
 #include <windows.h>
+#include <algorithm>
 #include <cmath>
 #include <array>
 #include <cstdlib>
@@ -125,6 +126,13 @@ std::vector<Husk> g_husks;
 ULONGLONG g_nextGoals = 0, g_nextSummary = 0;
 int g_goalsLogged = 0;
 bool g_spawningGuardians = false, g_guardiansSpawned = false, g_spawningRoamers = false;
+// A roaming group's members are spawned one per tick (about 15 ms each; a whole group in one frame was a hitch every 20 s).
+struct PendingRoamer {
+    uintptr_t cls;
+    float at[3];
+    float yaw;
+};
+std::vector<PendingRoamer> g_pendingRoamers;
 int g_guards = 0;
 ULONGLONG g_roamersFrom = 0, g_nextRoamers = 0;  // the groups out on the map (UpdateRoamers)
 int g_roamerGroupsSpawned = 0;
@@ -221,6 +229,7 @@ void Reset() {
     g_nextGoals = g_nextSummary = 0;
     g_goalsLogged = 0;
     g_spawningGuardians = g_guardiansSpawned = g_spawningRoamers = false;
+    g_pendingRoamers.clear();
     g_guards = 0;
     g_roamersFrom = g_nextRoamers = 0;
     g_roamerGroupsSpawned = 0;
@@ -289,7 +298,7 @@ void UpdateGoals() {
         Player p{ pawn };
         if (Alive(pawn, p.at)) players.push_back(p);
     }
-    uintptr_t atlasGoal = atlas::Goal();
+    uintptr_t atlasGoal = game::Outpost() ? objectives::OutpostCore() : atlas::Goal();  // an outpost's waves: its core
     float atlasAt[3];
     bool atlasKnown = atlasGoal && engine::Location(atlasGoal, atlasAt);
     int onPlayer = 0, onAtlas = 0, idle = 0;
@@ -529,7 +538,22 @@ bool OnNavigation(const float* point, float* out) {
 
 using PlayerSpots = std::vector<std::array<float, 3>>;
 
+void SpawnNextRoamer() {
+    if (g_pendingRoamers.empty()) return;
+    PendingRoamer member = g_pendingRoamers.front();
+    g_pendingRoamers.erase(g_pendingRoamers.begin());
+    float rotation[3] = { 0.0f, member.yaw, 0.0f };
+    uintptr_t husk = engine::SpawnActorAt(member.cls, 0, member.at, rotation, kAdjustButAlwaysSpawn);
+    if (!husk) return;
+    g_spawningRoamers = true;
+    engine::ProcessEvent(husk, engine::FindFunction("/Script/Engine.Pawn.SpawnDefaultController"), nullptr);  // tracked as a roamer
+    g_spawningRoamers = false;
+}
+
 int SpawnRoamerGroup(const PlayerSpots& players) {
+    LARGE_INTEGER frequency, started, searched, queued;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&started);
     float spot[3];
     bool found = false;
     for (int t = 0; t < kRoamerTries && !found; t++) {
@@ -542,6 +566,7 @@ int SpawnRoamerGroup(const PlayerSpots& players) {
         for (const auto& p : players)
             if (Distance(spot, p.data()) < kRoamerSpawnMin) found = false;
     }
+    QueryPerformanceCounter(&searched);
     if (!found) return 0;
     int total = 0;
     for (const auto& g : kRoamerGroups) total += g.weight;
@@ -557,12 +582,9 @@ int SpawnRoamerGroup(const PlayerSpots& players) {
     int poolSize = 0;
     while (poolSize < 5 && group->pool[poolSize]) poolSize++;
     int size = group->minSize + static_cast<int>(Random(static_cast<uint32_t>(group->maxSize - group->minSize + 1)));
-    uintptr_t spawnController = engine::FindFunction("/Script/Engine.Pawn.SpawnDefaultController");
     float yaw = static_cast<float>(Random(360));
-    float rotation[3] = { 0.0f, yaw, 0.0f };
     std::string names;
     int spawned = 0;
-    g_spawningRoamers = true;
     for (int i = 0; i < size; i++) {
         const char* kind = group->pool[Random(static_cast<uint32_t>(poolSize))];
         uintptr_t cls = KindClass(kind);
@@ -570,25 +592,26 @@ int SpawnRoamerGroup(const PlayerSpots& players) {
         // Around the spot, each on the navmesh too (on a slope a point beside it can be inside the ground).
         float angle = (i * 360.0f / size + yaw) * 0.0174533f;
         float beside[3] = { spot[0] + std::cos(angle) * kRoamerMemberSpacing, spot[1] + std::sin(angle) * kRoamerMemberSpacing, spot[2] };
-        float at[3] = { spot[0], spot[1], spot[2] };
-        if (i) OnNavigation(beside, at);
-        at[2] += kRoamerLift;
-        uintptr_t husk = engine::SpawnActorAt(cls, 0, at, rotation, kAdjustButAlwaysSpawn);
-        if (!husk) continue;
-        engine::ProcessEvent(husk, spawnController, nullptr);  // possessed: tracked as a roamer
+        PendingRoamer member{ cls, { spot[0], spot[1], spot[2] }, yaw };
+        if (i) OnNavigation(beside, member.at);
+        member.at[2] += kRoamerLift;
+        g_pendingRoamers.push_back(member);
         names += std::string(" ") + kind;
         spawned++;
     }
-    g_spawningRoamers = false;
     float nearest = 0.0f;
     for (const auto& p : players) {
         float d = Distance(spot, p.data());
         if (!nearest || d < nearest) nearest = d;
     }
+    QueryPerformanceCounter(&queued);
+    auto ms = [&](const LARGE_INTEGER& from, const LARGE_INTEGER& to) {
+        return static_cast<double>(to.QuadPart - from.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart);
+    };
     if (spawned) {
         g_roamerGroupsSpawned++;
-        LOG("director: group %d out on the map at (%.0f, %.0f, %.0f), %.0f from the nearest player:%s", g_roamerGroupsSpawned,
-            spot[0], spot[1], spot[2], nearest, names.c_str());
+        LOG("director: group %d out on the map at (%.0f, %.0f, %.0f), %.0f from the nearest player:%s (spot %.0f ms, members %.0f ms)",
+            g_roamerGroupsSpawned, spot[0], spot[1], spot[2], nearest, names.c_str(), ms(started, searched), ms(searched, queued));
     }
     return spawned;
 }
@@ -601,8 +624,9 @@ void UpdateRoamers(bool active) {
         return;
     }
     if (!g_roamersFrom) g_roamersFrom = now + kRoamerFirstMs;
+    SpawnNextRoamer();
     // Roamers every player left far behind go away (pawn and controller).
-    int alive = 0;
+    int alive = static_cast<int>(g_pendingRoamers.size());
     for (auto& husk : g_husks) {
         if (!husk.roamer || !engine::IsLive(husk.controller)) continue;
         uintptr_t pawn = At<uint32_t>(husk.controller, ControllerMyFortPawn);
@@ -631,16 +655,40 @@ void UpdateRoamers(bool active) {
     if (!SpawnRoamerGroup(players)) g_nextRoamers = now + kRoamerGroupMs / 4;  // no spot this time: soon again
 }
 
+// The first navigation query sets the navigation system up (some 80 ms): made at the mission's start, which pauses
+// anyway, instead of with the first group out on the map half a minute later.
+void WarmNavigation() {
+    uintptr_t pawn = engine::PawnOf(engine::LocalPlayerController());
+    float at[3], out[3];
+    if (pawn && engine::Location(pawn, at)) OnNavigation(at, out);
+}
+
+void PreloadRoamers() {
+    if (!game::g_on.director || !game::g_on.roamers) return;
+    int loaded = 0, kinds = 0;
+    std::vector<std::string> done;
+    for (const auto& g : kRoamerGroups) {
+        for (const char* kind : g.pool) {
+            if (!kind || std::find(done.begin(), done.end(), kind) != done.end()) continue;
+            done.push_back(kind);
+            kinds++;
+            if (KindClass(kind)) loaded++;
+        }
+    }
+    LOG("director: %d of %d roaming husk kinds loaded ahead", loaded, kinds);
+}
+
 // Mission_Gates' encounter otherwise goes through generated encounter profiles, which this client may not be able
-// to build; with the flag off it starts BaseGateEncounter_C, which needs only the director.
-void UseOldEncounters() {
+// to build; with the flag off it starts BaseGateEncounter_C, which needs only the director. The outpost defenses have
+// no old path: they need the flag on (the engine generates their profiles only then).
+void UseOldEncounters(bool old) {
     uintptr_t gEngine = At<uint32_t>(engine::Va(kGEngine), 0);
     uintptr_t globals = gEngine ? At<uint32_t>(gEngine, EngineGameSingleton) : 0;
     if (!engine::IsA(globals, "FortGlobals")) {
         LOG("director: FortGlobals not found (%s)", engine::Describe(globals).c_str());
         return;
     }
-    At<uint8_t>(globals, GlobalsEnableNewEncounters) = 0;
+    At<uint8_t>(globals, GlobalsEnableNewEncounters) = old ? 0 : 1;
 }
 
 bool ExpandNavigation() {

@@ -100,6 +100,12 @@ struct Loadout {
         int count, slot;
     };
     std::vector<Carried> backpack;  // theater0: what the player carried out of the last zone
+    struct Structure {
+        int outpost;
+        std::string asset;
+        int level;
+    };
+    std::vector<Structure> structures;  // the outposts' structures and their levels
 };
 
 // The materials given at the start (definition, path, count), for what was used or gathered by the end.
@@ -151,6 +157,10 @@ Loadout Parse(const std::string& text) {
             int count = 0;
             words >> path >> count;
             if (!path.empty() && count > 0) lobby.items.emplace_back(path, count);
+        } else if (key == "structure") {
+            Loadout::Structure structure{ 0, "", 0 };
+            words >> structure.outpost >> structure.asset >> structure.level;
+            if (structure.outpost > 0 && !structure.asset.empty() && structure.level > 0) lobby.structures.push_back(structure);
         } else if (key == "backpack") {
             Loadout::Carried carried{ "", 0, -1 };
             words >> carried.path >> carried.count >> carried.slot;
@@ -619,7 +629,8 @@ void Save(uintptr_t pc, bool autosave) {
         if (item.count <= 0 || item.slot == 0 || FromHero(heroItems, item.definition) ||
             engine::IsA(item.definition, "FortBuildingItemDefinition") ||
             engine::IsA(item.definition, "FortEditToolItemDefinition") || engine::IsA(item.definition, "FortResourceItemDefinition") ||
-            engine::IsA(item.definition, "FortIngredientItemDefinition") || engine::IsA(item.definition, "FortNeverPersistItemDefinition"))
+            engine::IsA(item.definition, "FortIngredientItemDefinition") || engine::IsA(item.definition, "FortNeverPersistItemDefinition") ||
+            engine::IsA(item.definition, "FortOutpostItemDefinition"))  // the outpost's structures are kept apart
             continue;
         backpack += std::string(carried ? "," : "") + "{\"path\":\"" + PathOf(item.definition) + "\",\"count\":" +
                     std::to_string(item.count) + ",\"slot\":" + std::to_string(item.slot) + "}";
@@ -682,6 +693,65 @@ void Grant(uintptr_t pc, uintptr_t pawn, bool items) {
     }
     LOG("loadout: %s: %d kit(s), %d abilities, %d passive effect(s), %d item(s), %d gadget(s):%s", engine::Name(heroType).c_str(),
         granted.kits, granted.abilities, granted.effects, granted.items, granted.gadgets, granted.names.c_str());
+}
+
+// The outpost zone's number (Zone_Outpost_PvE_0N), 0 elsewhere.
+int OutpostNumber() {
+    std::string world = engine::Name(engine::World());
+    return game::Outpost() && !world.empty() && world.back() >= '1' && world.back() <= '4' ? world.back() - '0' : 0;
+}
+
+void GiveOutpostStructures(uintptr_t pc) {
+    Loadout lobby;
+    int outpost = OutpostNumber();
+    if (!outpost || !Get(pc, lobby)) return;
+    std::string given;
+    for (const Loadout::Structure& structure : lobby.structures) {
+        if (structure.outpost != outpost) continue;
+        std::string path = "/Game/TheOutpost/Items/" + structure.asset + "." + structure.asset;
+        uintptr_t definition = engine::Load(std::wstring(path.begin(), path.end()));
+        if (!engine::IsA(definition, "FortOutpostItemDefinition")) continue;
+        player::SetStructureLevel(pc, definition, structure.level);
+        given += " " + structure.asset + " " + std::to_string(structure.level);
+    }
+    LOG("loadout: outpost %d's structures:%s", outpost, given.empty() ? " none built" : given.c_str());
+}
+
+void SaveStructure(uintptr_t pc, uintptr_t structure, int level, const std::vector<std::pair<std::string, int>>& accountItems) {
+    std::string account = backend::AccountId(pc), asset = engine::Name(structure);
+    int outpost = OutpostNumber();
+    if (account.empty() || !outpost) return;
+    {
+        std::lock_guard<std::mutex> guard(g_lock);
+        auto entry = g_entries.find(account);
+        if (entry != g_entries.end()) {
+            auto& structures = entry->second.loadout.structures;
+            auto found = std::find_if(structures.begin(), structures.end(),
+                                      [&](const Loadout::Structure& s) { return s.outpost == outpost && s.asset == asset; });
+            if (found != structures.end()) found->level = level;
+            else structures.push_back({ outpost, asset, level });
+        }
+    }
+    std::string items;
+    for (const auto& [name, quantity] : accountItems)
+        items += std::string(items.empty() ? "" : ",") + "{\"name\":\"" + name + "\",\"quantity\":" + std::to_string(quantity) + "}";
+    std::string json = "{\"accountId\":\"" + account + "\",\"outpost\":" + std::to_string(outpost) + ",\"structure\":\"" + asset +
+                       "\",\"level\":" + std::to_string(level) + ",\"accountItems\":[" + items + "]}";
+    backend::Post(L"/fortnite/api/game/v2/ot65/outpost/upgrade", json, [asset, level](int status, const std::string&) {
+        LOG("loadout: %s level %d %s (%d)", asset.c_str(), level, status == 200 ? "kept" : "NOT kept", status);
+    });
+}
+
+void GiveLobbyGadget(const std::string& name) {
+    uintptr_t pc = engine::LocalPlayerController(), pawn = engine::PawnOf(pc);
+    uintptr_t gadget = LobbyGadget(name);
+    if (!pc || !pawn || !gadget) {
+        LOG("loadout: can't give the gadget %s (no player, or no such gadget)", name.c_str());
+        return;
+    }
+    Granted granted;
+    GiveGadget(pc, pawn, gadget, true, kLobbyGadgetSlot, granted);
+    LOG("loadout: gave the gadget %s (key 5)", engine::Name(gadget).c_str());
 }
 
 void ApplyStats(uintptr_t pc, uintptr_t pawn) {

@@ -88,7 +88,8 @@ void WriteRewardReport(uintptr_t pc, bool won, const uint8_t* guid) {
 }
 
 // The backend puts the mission's rewards into the player's profile (src/routes/ot65.js in Fortify-Alpha); the client
-// picks them up with its next profile call in the lobby.
+// picks them up with its next profile call in the lobby. A won outpost (Zone_Outpost_PvE_0N) also completes the
+// player's outpost quest of that theater there.
 void ReportMission(uintptr_t pc) {
     std::string account = backend::AccountId(pc), zone = backend::ZoneInstanceId();
     std::string theater = backend::JsonField(zone, "theaterId"), mission = backend::JsonField(zone, "theaterMissionId");
@@ -97,8 +98,10 @@ void ReportMission(uintptr_t pc) {
             mission.c_str());
         return;
     }
+    std::string world = engine::Name(engine::World());
+    std::string outpost = game::Outpost() ? world.substr(world.size() - 1) : "0";
     std::string json = "{\"accountId\":\"" + account + "\",\"theaterId\":\"" + theater + "\",\"missionGuid\":\"" + mission +
-                       "\",\"victory\":" + (g_state.won ? "true" : "false") + "}";
+                       "\",\"victory\":" + (g_state.won ? "true" : "false") + ",\"outpost\":" + outpost + "}";
     backend::Post(L"/fortnite/api/game/v2/ot65/mission/end", json, [](int status, const std::string& body) {
         LOG("endzone: rewards: the backend answered %d %s", status, body.substr(0, 300).c_str());
     });

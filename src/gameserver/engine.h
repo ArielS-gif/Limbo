@@ -37,6 +37,8 @@ uintptr_t FindSubobject(uintptr_t outer, const char* className);  // scans GObje
 uintptr_t FindFirstOfClass(const char* className);                // a live instance, not a default object
 uintptr_t FindFirstA(const char* className);                      // the same, of that class or a subclass (BP)
 std::vector<uintptr_t> FindAllA(const char* className);           // every live instance of that class or a subclass
+// Every instance of each of these classes (exact class, no subclasses), in one pass over GObjects.
+std::vector<std::vector<uintptr_t>> FindAllOf(const std::vector<std::string>& classNames);
 uintptr_t SpawnObject(uintptr_t cls, uintptr_t outer);            // GameplayStatics.SpawnObject
 
 bool Location(uintptr_t actor, float* xyz);         // the root component's world location

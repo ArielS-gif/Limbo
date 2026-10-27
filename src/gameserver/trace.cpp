@@ -63,8 +63,8 @@ static const char* kWatched[] = {
     "Theater", "Zone", "MatchState", "Travel", "Encounter", "Objective",
     "Matchmak", "Validate", "Lobby", "HeroSelect", "HeroChoice", "SetCurrentHero", "ServerSetHero", "SetDefaultHero",
 };
-// Functions whose first parameter is an FString URL worth logging (ClientTravel, SwitchLevel, ...).
-static const char* kUrlFunctions[] = { "Travel", "SwitchLevel" };
+// Functions whose first parameter is an FString worth logging (ClientTravel and SwitchLevel URLs, ClientMessage text).
+static const char* kUrlFunctions[] = { "Travel", "SwitchLevel", "ClientMessage" };
 // `state` counts live instances of classes whose own or parent class name contains one of these.
 static const char* kCounted[] = {
     "GameMode", "GameState", "WorldManager", "MissionManager", "MissionGeneration", "AIDirector",
@@ -85,6 +85,7 @@ struct NamedInfo {
     std::string name;
     bool watched = false;
     bool readyCheck = false;  // this is GameMode.ReadyToStartMatch
+    bool muzzle = false;      // a weapon's GetMuzzleLocation (its answer is checked after the call)
     bool urlParam = false;    // the name matches kUrlFunctions
     int event = 0;            // a function the mission code reacts to (game::EventFor)
     uint64_t calls = 0;
@@ -119,6 +120,7 @@ static NamedInfo& Lookup(std::unordered_map<uintptr_t, NamedInfo>& cache, uintpt
         info.name = full ? ue::PathName(object) : ue::ObjectName(object);
         info.watched = Watched(info.name);
         info.readyCheck = info.name == kReadyToStartMatch;
+        info.muzzle = full && info.name.size() > 18 && info.name.compare(info.name.size() - 18, 18, ".GetMuzzleLocation") == 0;
         info.urlParam = Matches(info.name.substr(info.name.rfind('.') + 1), kUrlFunctions, std::size(kUrlFunctions));
         if (full) info.event = game::EventFor(info.name);
     }
@@ -578,8 +580,8 @@ static void CallFunction(const std::vector<std::string>& words) {
     }
     std::string label = words[1];
     call.after = [label](const uint8_t* params) {
-        char bytes[3 * 32 + 1] = {};
-        for (int i = 0; i < 32; i++) snprintf(bytes + i * 3, 4, "%02X ", params[i]);
+        char bytes[3 * 48 + 1] = {};
+        for (int i = 0; i < 48; i++) snprintf(bytes + i * 3, 4, "%02X ", params[i]);
         LOG("call: %s done; params %s", label.c_str(), bytes);
     };
     g_pending.push_back(std::move(call));
@@ -923,11 +925,12 @@ static void Poll() {
 struct CallInfo {
     bool readyCheck;  // GameMode.ReadyToStartMatch, whose answer the hook reads after the call
     int event;        // a call the mission code reacts to
+    bool muzzle;      // a weapon's GetMuzzleLocation, whose answer weapons.cpp may correct after the call
 };
 
 static CallInfo OnCall(uintptr_t object, uintptr_t function, void* params) {
     NamedInfo& fn = Lookup(g_functions, function, true);
-    CallInfo info{ fn.readyCheck, fn.event };
+    CallInfo info{ fn.readyCheck, fn.event, fn.muzzle };
     if (fn.calls++ == 0 && g_seen) {
         uintptr_t cls = mem::ReadOr<uint32_t>(object + ue::obj::Class);
         fprintf(g_seen, "%s  (on %s)\n", fn.name.c_str(), ue::ObjectName(cls).c_str());
@@ -991,6 +994,7 @@ static void __fastcall ProcessEventHook(uintptr_t object, void* edx, uintptr_t f
         if (info.event) game::OnEvent(info.event, object, params);
     }
     g_original(object, edx, function, params);
+    if (info.muzzle && params) weapons::AfterMuzzleLocation(object, static_cast<float*>(params));
 
     // ReadyToStartMatch's only parameter is its bool return value.
     if (info.readyCheck && params) {
