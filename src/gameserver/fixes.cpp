@@ -1,8 +1,10 @@
 #include "fixes.h"
+#include "engine.h"
 #include "hook.h"
 #include "log.h"
 #include "ue.h"
 #include <cstdint>
+#include <set>
 
 namespace fixes {
 
@@ -40,7 +42,23 @@ static uintptr_t __cdecl GetMcpWorldsHook(uintptr_t worldContext, const uint32_t
     return g_getMcpWorlds(worldContext, user);
 }
 
+// Debug boxes: blueprints left in this build draw red wireframe boxes into the world through
+// KismetSystemLibrary.DrawDebugBox (developer aids; a shipped game never showed them). Its exec thunk's one call to
+// UKismetSystemLibrary::DrawDebugBox (cdecl: world context, center, extent, color, rotation, duration; 017278B0)
+// is pointed here: nothing is drawn, and the first box from each kind of object is logged with who asked.
+constexpr uint32_t kDrawDebugBoxCall = 0x01AF0276, kDrawDebugBox = 0x017278B0;
+
+static void __cdecl NoDebugBox(uintptr_t worldContext, float cx, float cy, float cz, float ex, float ey, float ez) {
+    static std::set<uintptr_t> logged;
+    uintptr_t cls = worldContext ? *reinterpret_cast<const uint32_t*>(worldContext + 0xC) : 0;
+    if (logged.size() < 32 && logged.insert(cls).second)
+        LOG("fixes: a debug box left out (asked for by %s, at %.0f, %.0f, %.0f, size %.0f x %.0f x %.0f)",
+            engine::Describe(worldContext).c_str(), cx, cy, cz, ex * 2, ey * 2, ez * 2);
+}
+
 bool Install() {
+    bool boxes = engine::PatchCall(kDrawDebugBoxCall, kDrawDebugBox, reinterpret_cast<void*>(&NoDebugBox));
+    LOG("fixes: blueprints' debug boxes %s", boxes ? "are not drawn" : "NOT patched (still drawn)");
     if (!hook::Install(ue::g.exeBase + kGetMcpWorlds, kGetMcpWorldsStart, sizeof(kGetMcpWorldsStart),
                        reinterpret_cast<void*>(&GetMcpWorldsHook), reinterpret_cast<void**>(&g_getMcpWorlds))) {
         LOG("fixes: GetMcpWorlds hook NOT installed (unexpected bytes at exe+0x%X, or patching failed)", kGetMcpWorlds);
