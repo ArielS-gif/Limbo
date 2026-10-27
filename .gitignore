@@ -1,0 +1,7 @@
+# Builds, logs, crash dumps, test copies' folders
+out/
+# The game's own config files (Epic's): the patch pak is built from each player's own game
+config/
+# Caches of the reverse-engineering helper
+tools/.cache/
+*.log

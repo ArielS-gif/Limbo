@@ -1,0 +1,55 @@
+# Builds Limbo (gameserver.dll and injector.exe, 32-bit) on GitHub's Windows runners from this repository's source.
+# Every push gets a downloadable build; a tag like v0.1.0 also becomes a release with the zip and its SHA-256.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up the 32-bit compiler
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Build
+        shell: cmd
+        run: build.bat
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "Limbo-${{ github.ref_name }}" -replace '[^A-Za-z0-9._-]', '-'
+          New-Item -ItemType Directory -Force pkg/Limbo/out, pkg/Limbo/tools | Out-Null
+          Copy-Item out/gameserver.dll, out/injector.exe pkg/Limbo/out/
+          Copy-Item tools/build-patch-pak.js, tools/pak.js pkg/Limbo/tools/
+          Copy-Item README.md, LICENSE, "Play Limbo.bat" pkg/Limbo/
+          Compress-Archive -Path pkg/Limbo -DestinationPath "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+          Get-FileHash pkg/Limbo/out/* -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path -Leaf $_.Path)" }
+          "$hash  $name.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Limbo
+          path: Limbo-*.zip*
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Limbo-*.zip
+            Limbo-*.zip.sha256
