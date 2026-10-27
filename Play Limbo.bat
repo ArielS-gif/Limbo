@@ -40,6 +40,7 @@ if defined REMOTE (
 netstat -an | findstr /r /c:":3551 .*LISTENING" >nul && goto launch
 set "BACKEND="
 if exist "%ROOT%\Limbo-Backend\index.js" set "BACKEND=%ROOT%\Limbo-Backend"
+if not defined BACKEND if exist "%ROOT%\Limbo-Backend-main\index.js" set "BACKEND=%ROOT%\Limbo-Backend-main"
 if not defined BACKEND if exist "%ROOT%\Fortify-Alpha-main\index.js" set "BACKEND=%ROOT%\Fortify-Alpha-main"
 if not defined BACKEND (
   echo No backend folder ^(Limbo-Backend^) next to Limbo.
