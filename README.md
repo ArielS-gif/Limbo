@@ -1,104 +1,65 @@
 # Limbo
 
-Limbo brings the February 2016 **Fortnite: Save the World alpha** (Online Test 6.5, build 2252016-3240987) back to a
-playable state: missions, co-op with friends, husks, chat, the tutorial and the outposts. It restores the server
-pieces that were stripped out of the game client, so your own game runs the zone and hosts it for your friends.
+Limbo makes the old 2016 Fortnite Save the World alpha (OT6.5, build 2252016-3240987) playable again, with your friends.
 
-> Limbo is not affiliated with Epic Games and contains no game files. You need your own copy of the OT6.5 build.
-> Made for personal, educational and game-preservation use.
+You need your own copy of the OT6.5 build. Limbo doesn't come with any game files and has nothing to do with Epic Games.
 
-## What works
+## What you can do
 
-- **Missions from the Play tab:** Close the Gate (one to four gates), Deliver the Goods, Launch the Rocket, Retrieve
-  the Data and Power the Storm Shield. Tiles for missions this build doesn't have open the nearest one it does.
-- **Co-op for up to 4 players:** start a mission together from one launch screen, or join a game that's already
-  running. Every player keeps their own hero, inventory and backpack, saved to their own account.
-- **Husks:** the Atlas defense waves, guardians by the chests, and roaming groups around the map.
-- **Chat:** the GLOBAL channel, friends and presence, through a small chat server in the backend.
-- **The tutorial** (Onboarding Fort, "Help Ramirez") with its cutscenes, and **the four outposts**.
-- Building, editing, harvesting, crafting, traps, gadgets, mission rewards, and your backpack carried between zones.
+- Play missions from the Play tab
+- Play co-op with up to 4 people
+- Fight husks around the map
+- Chat with your friends
+- Play the tutorial and go to the outposts
 
-Work in progress: some of the newer missions haven't been played all the way through yet, Flingers don't fight, and
-what you build at an outpost isn't kept between visits.
+Still in progress: some missions haven't been tested all the way through, Flingers just stand there, and what you build at the outpost doesn't save.
 
-## How it works
+## Setup
 
-The OT6.5 client was shipped without its server code. Limbo is a DLL (`gameserver.dll`) loaded into the game that puts
-those pieces back: hosting and replication, the mission flow, the AI director, the player's setup. A modified
-[Fortify-Alpha](https://github.com/vopswtf/Fortify-Alpha) backend,
-[Limbo-Backend](https://github.com/ArielS-gif/Limbo-Backend), keeps accounts and profiles and adds co-op launch
-screens, chat and mission fixes.
-
-## What's in this repository
-
-| Path | What it is |
-| --- | --- |
-| `src/gameserver` | The DLL (C++): everything that runs inside the game |
-| `src/injector` | `injector.exe`: loads the DLL into the game (only the 32-bit OT6.5 client in its own folder) |
-| `Play Limbo.bat` | Starts everything: the backend on the host's PC, the game, and Limbo |
-| `tools` | The patch-pak builder, test scripts and the reverse-engineering helper |
-| `docs/DEVLOG.md` | Every finding along the way: what was stripped from the client and how each piece was restored |
-
-## Is it safe?
-
-- **All of the code is here.** Limbo doesn't download or run anything you can't read in this repository.
-- **The release files are built by GitHub Actions** from this exact source, so you can check the build log and the
-  SHA-256 checksums. You can also build them yourself (below).
-- **What the DLL does:** it runs only inside the game. It changes the game's code and data in memory (every change is
-  listed in the dev log), talks to the backend you point it at, and writes its logs next to itself. It doesn't touch
-  files elsewhere, doesn't start with Windows, and sends nothing anywhere except your backend.
-- **The injector** uses standard DLL injection (a remote thread that calls LoadLibrary) and refuses any process but the
-  32-bit OT6.5 client. Some antivirus programs flag any injector on principle.
-
-## Folder layout
-
-Put Limbo (a [release](https://github.com/ArielS-gif/Limbo/releases), or this repository built) next to the game:
+Put the folders next to each other:
 
 ```
 OT6.5\
-  Fortnite (2252016-3240987)\   your game, as it comes (with its FortniteLauncher.exe)
-  Limbo\                        this
-  Limbo-Backend\                the backend (only on the host's PC)
+  Fortnite (2252016-3240987)\
+  Limbo\
+  Limbo-Backend\   (only the host needs this)
 ```
 
-Limbo adds one file to the game, `FortniteGame\Content\Paks\FortniteGame-WindowsClient_p.pak`, built from your own
-game's files the first time you start it; everything else happens in memory while the game runs.
+Get Limbo from the [Releases](https://github.com/ArielS-gif/Limbo/releases) page and the backend from [Limbo-Backend](https://github.com/ArielS-gif/Limbo-Backend).
 
-## Hosting (the PC that runs the backend)
+### Hosting
 
-1. Install [Node.js](https://nodejs.org) and [MongoDB Community Server](https://www.mongodb.com/try/download/community).
-2. Get [Limbo-Backend](https://github.com/ArielS-gif/Limbo-Backend) into `OT6.5\Limbo-Backend`, run `npm install` in
-   it, and copy `.env.example` to `.env`: `PORT=3551`, `MONGO_URI=mongodb://127.0.0.1/limbo` and a long random
-   `JWT_SECRET` of your own.
-3. Run **Play Limbo.bat**. It builds the patch pak the first time, starts the backend, starts the game and loads Limbo.
-4. Log in with any name and password (the account is created on first login), pick a mission and press **Play**.
+1. Install [Node.js](https://nodejs.org) and [MongoDB](https://www.mongodb.com/try/download/community).
+2. In the Limbo-Backend folder, run `npm install`, then copy `.env.example` to `.env` and fill it in:
+   `PORT=3551`, `MONGO_URI=mongodb://127.0.0.1/limbo`, and any long random `JWT_SECRET`.
+3. Run `Play Limbo.bat`.
+4. Log in with any name and password, pick a mission and press Play.
 
-## Friends on other PCs
+### Joining a friend
 
-1. Get on one network with the host: the same LAN, or a free VPN such as Radmin VPN or Tailscale.
-2. The host allows the game and Node through Windows Firewall: TCP 3551 (backend) and TCP 5222 (chat). Whoever hosts
-   a mission also needs UDP 7777 (the game) allowed.
-3. Install [Node.js](https://nodejs.org) (for the patch pak), put Limbo next to your game, and write the host's
-   address into `Limbo\out\backend.txt`, like `26.12.34.56:3551`.
-4. Run **Play Limbo.bat**, log in with any name, and press **Play** while someone's launch screen is up or while they
-   are in a mission.
+1. Get on the same network as them (same Wi-Fi, or Radmin VPN / Tailscale).
+2. Install [Node.js](https://nodejs.org).
+3. Put your friend's address in `Limbo\out\backend.txt`, like `26.12.34.56:3551`.
+4. Run `Play Limbo.bat`, log in, and press Play while they're starting a mission or already in one.
 
-Whoever presses Play first hosts the mission; up to 4 players. If you change backends later, delete the patch pak
-(above) so it is built again for the new address.
+The host has to allow TCP ports 3551 and 5222 in the firewall, and whoever hosts a mission needs UDP 7777.
 
-## Building
+## Is it safe?
 
-Visual Studio 2022 or newer with "Desktop development with C++", then run `build.bat`. It produces
-`out\gameserver.dll` and `out\injector.exe` (both 32-bit, like the game).
+All the code is right here, and the downloads on the Releases page are built by GitHub straight from it. The DLL only runs inside the game and only talks to your backend. Some antivirus programs don't like injectors, so it might get flagged.
+
+## Building it yourself
+
+Install Visual Studio with "Desktop development with C++" and run `build.bat`.
+
+If you want to know how it all works, my notes are in [docs/DEVLOG.md](docs/DEVLOG.md).
 
 ## Credits
 
-- [vopswtf](https://github.com/vopswtf): Fortify-Alpha, the backend that Limbo-Backend is forked from.
-- [NOTPIES](https://github.com/NOTPIES): the original OT6 research.
-- [Project Mercury](https://github.com/absoluteSpacehead/MercuryLauncher): its launcher showed that OT6.5 loads an
-  extra `_p` patch pak, and how to lay one out.
+- [vopswtf](https://github.com/vopswtf) for Fortify-Alpha, which Limbo-Backend is based on
+- [NOTPIES](https://github.com/NOTPIES) for the original OT6 research
+- [Project Mercury](https://github.com/absoluteSpacehead/MercuryLauncher) for figuring out the patch pak
 
 ## License
 
-Limbo's own code is under the [MIT License](LICENSE). Limbo-Backend is a fork of Fortify-Alpha, which has no license
-of its own; its original code stays its author's.
+MIT. Limbo-Backend's original code belongs to vopswtf.
