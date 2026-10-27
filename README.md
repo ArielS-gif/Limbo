@@ -29,11 +29,10 @@ Get Limbo from the [Releases](https://github.com/ArielS-gif/Limbo/releases) page
 
 ### Hosting
 
-1. Install [Node.js](https://nodejs.org) and [MongoDB](https://www.mongodb.com/try/download/community).
-2. In the Limbo-Backend folder, run `npm install`, then copy `.env.example` to `.env` and fill it in:
-   `PORT=3551`, `MONGO_URI=mongodb://127.0.0.1/limbo`, and any long random `JWT_SECRET`.
-3. Run `Play Limbo.bat`.
-4. Log in with any name and password, pick a mission and press Play.
+1. Install [Node.js](https://nodejs.org) and [MongoDB](https://www.mongodb.com/try/download/community)
+   (leave "Install MongoDB as a Service" ticked).
+2. Run `Play Limbo.bat`. The first time, it installs the backend's packages and sets it up with a new, empty database.
+3. Log in with any name and password, pick a mission and press Play.
 
 ### Joining a friend
 

@@ -46,6 +46,41 @@ if not defined BACKEND (
   echo No backend folder ^(Limbo-Backend^) next to Limbo.
   goto end
 )
+
+rem A freshly downloaded backend has no packages and no .env yet: install them and make a fresh one the first time.
+where node >nul 2>&1 || (
+  echo Node.js isn't installed - get it from https://nodejs.org and run this again.
+  goto end
+)
+if not exist "%BACKEND%\node_modules\dotenv-safe" (
+  echo Installing the backend's packages ^(first time only^)...
+  pushd "%BACKEND%"
+  call npm install --no-audit --no-fund --loglevel=error
+  popd
+)
+if not exist "%BACKEND%\node_modules\dotenv-safe" (
+  echo Could not install the backend's packages - see the messages above.
+  goto end
+)
+if exist "%BACKEND%\.env" goto envready
+set "SECRET="
+for /f "usebackq delims=" %%s in (`node -p "require('crypto').randomBytes(32).toString('hex')"`) do set "SECRET=%%s"
+>"%BACKEND%\.env" (
+  echo PORT=3551
+  echo MONGO_URI=mongodb://127.0.0.1:27017/limbo
+  echo JWT_SECRET=%SECRET%
+)
+echo Made the backend's settings ^(.env^) with a new database called limbo.
+:envready
+
+rem The backend starts even without MongoDB, but then nobody can log in.
+findstr /b /i /c:"MONGO_URI=mongodb://127.0.0.1" /c:"MONGO_URI=mongodb://localhost" "%BACKEND%\.env" >nul || goto startbackend
+netstat -an | findstr /r /c:":27017 .*LISTENING" >nul && goto startbackend
+echo MongoDB isn't running. Install MongoDB Community Server from https://www.mongodb.com/try/download/community
+echo ^(leave "Install MongoDB as a Service" ticked^), or start it, then run this again.
+goto end
+
+:startbackend
 echo Starting the backend...
 start "Limbo backend" cmd /k "cd /d "%BACKEND%" && node index.js"
 for /l %%i in (1,1,20) do (
