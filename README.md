@@ -25,7 +25,7 @@ OT6.5\
   Limbo-Backend\   (only the host needs this)
 ```
 
-Get Limbo from the [Releases](https://github.com/ArielS-gif/Limbo/releases) page and the backend from [Limbo-Backend](https://github.com/ArielS-gif/Limbo-Backend).
+Get Limbo from the [Releases](https://github.com/ArielS-gif/Limbo/releases) page, and the backend (`Limbo-Backend.zip`) from [Limbo-Backend's Releases](https://github.com/ArielS-gif/Limbo-Backend/releases).
 
 ### Hosting
 
