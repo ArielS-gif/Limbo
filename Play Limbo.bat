@@ -8,15 +8,20 @@ rem rebuilt whenever it changes. And whether accounts play the tutorial, the hom
 rem (out\tutorial.txt; the backend is told before the game starts).
 setlocal
 title Limbo
-echo.
-echo  ___       ___  _____ ______   ________  ________
-echo ^|\  \     ^|\  \^|\   _ \  _   \^|\   __  \^|\   __  \
-echo \ \  \    \ \  \ \  \\\__\ \  \ \  \^|\ /\ \  \^|\  \
-echo  \ \  \    \ \  \ \  \\^|__^| \  \ \   __  \ \  \\\  \
-echo   \ \  \____\ \  \ \  \    \ \  \ \  \^|\  \ \  \\\  \
-echo    \ \_______\ \__\ \__\    \ \__\ \_______\ \_______\
-echo     \^|_______^|\^|__^|\^|__^|     \^|__^|\^|_______^|\^|_______^|
-echo.
+rem Colours for the menu: Windows 10 and later draw them (ESC comes from prompt's $E); older ones get plain text.
+set "ESC="
+ver | findstr /c:"Version 10." >nul && for /f %%e in ('echo prompt $E^| cmd') do set "ESC=%%e"
+set "C=" & set "G=" & set "Y=" & set "D=" & set "R=" & set "ON=" & set "OFF="
+if defined ESC (
+  set "C=%ESC%[96m"
+  set "G=%ESC%[92m"
+  set "Y=%ESC%[93m"
+  set "D=%ESC%[90m"
+  set "R=%ESC%[0m"
+  set "ON=%ESC%[30;102m"
+  set "OFF=%ESC%[30;103m"
+)
+call :banner
 set "LIMBO=%~dp0"
 for %%i in ("%LIMBO%..") do set "ROOT=%%~fi"
 set "GAME=%ROOT%\Fortnite (2252016-3240987)"
@@ -50,8 +55,11 @@ if "%CHOICE%"=="" set "MODE=auto"
 if /i "%CHOICE%"=="auto" set "MODE=auto"
 if /i "%CHOICE%"=="host" set "MODE=host"
 if "%MODE%"=="friend" for /f "usebackq delims=" %%a in (`node "%LIMBO%tools\build-patch-pak.js" --address "%LIMBO%out\play-on.txt"`) do set "ADDRESS=%%a"
-if "%MODE%"=="auto" echo.
-if "%MODE%"=="auto" echo  Looking for friends' games on your network...
+if "%MODE%"=="auto" (
+  cls
+  call :banner
+  echo  Looking for a friend's game on your network...
+)
 if "%MODE%"=="auto" for /f "usebackq tokens=1,*" %%a in (`node "%LIMBO%tools\discover.js"`) do if not defined FOUND (
   set "ADDRESS=%%a"
   set "FOUND=%%b"
@@ -61,20 +69,29 @@ echo %ADDRESS%| findstr /b /i "127.0.0.1 localhost" >nul && set "REMOTE="
 set "TUTORIAL=skip"
 if exist "%LIMBO%out\tutorial.txt" set /p TUTORIAL=<"%LIMBO%out\tutorial.txt"
 if /i not "%TUTORIAL%"=="play" set "TUTORIAL=skip"
+
+rem The screen, drawn afresh after every key.
+cls
+call :banner
+if "%MODE%"=="friend" echo  %C%SERVER%R%    your friend's, at %ADDRESS%
+if "%MODE%"=="host" echo  %C%SERVER%R%    this PC hosts - friends can join you
+if "%MODE%"=="auto" if defined FOUND echo  %C%SERVER%R%    your friend's, found on your network: %FOUND% - %ADDRESS%
+if "%MODE%"=="auto" if not defined FOUND echo  %C%SERVER%R%    this PC hosts - no friend's game on your network yet
 echo.
-if "%MODE%"=="friend" echo  Playing on a friend's backend: %ADDRESS%
-if "%MODE%"=="host" echo  Playing on this PC's backend: friends can join you.
-if "%MODE%"=="auto" if defined FOUND echo  Joining a friend's game found on your network: %FOUND% - %ADDRESS%
-if "%MODE%"=="auto" if not defined FOUND echo  No friend's game on your network yet: this PC hosts, and friends can join you.
-if "%TUTORIAL%"=="skip" echo  Accounts skip the tutorial ^(the homebase and the first outpost^).
-if "%TUTORIAL%"=="play" echo  Accounts play the tutorial ^(the homebase and the first outpost^).
+echo  %Y%======================================================================%R%
+if "%TUTORIAL%"=="skip" echo   %Y%TUTORIAL%R%   %OFF% OFF %R%  accounts skip it: the homebase and the first outpost
+if "%TUTORIAL%"=="play" echo   %Y%TUTORIAL%R%   %ON% ON %R%   accounts play it: the homebase and the first outpost
+if "%TUTORIAL%"=="skip" echo              press %Y%T%R% to turn it ON
+if "%TUTORIAL%"=="play" echo              press %Y%T%R% to turn it OFF
+echo  %Y%======================================================================%R%
 echo.
-echo    Enter   start the game
+echo    %G%Enter%R%   start the game
+if "%TUTORIAL%"=="skip" echo    %Y%T       turn the tutorial ON%R%
+if "%TUTORIAL%"=="play" echo    %Y%T       turn the tutorial OFF%R%
 echo    J       join a friend by the address their Limbo window shows
 echo    H       always host on this PC
+if "%MODE%"=="auto" echo    R       look for a friend's game again
 if not "%MODE%"=="auto" echo    A       find a friend's game on the network by itself ^(Radmin VPN, LAN^)
-if "%MODE%"=="auto" echo    R       look again
-echo    T       turn the tutorial on or off
 echo.
 set "PICK="
 set /p "PICK=  > "
@@ -87,6 +104,7 @@ goto start
 
 :join
 set "FRIEND="
+echo.
 set /p "FRIEND=  Your friend's address (like 26.12.34.56): "
 if not "%FRIEND%"=="" >"%LIMBO%out\play-on.txt" echo %FRIEND%
 goto menu
@@ -105,6 +123,8 @@ if "%TUTORIAL%"=="skip" (set "TUTORIAL=play") else (set "TUTORIAL=skip")
 goto menu
 
 :start
+cls
+call :banner
 rem Limbo's DLL talks to the same backend (out\backend.txt). The patch pak points the game at it; built again only when
 rem the address changed.
 >"%LIMBO%out\backend.txt" echo %ADDRESS%
@@ -184,6 +204,19 @@ rem Limbo goes in as soon as the game starts: chat logs in right after the game'
 
 :end
 pause
+exit /b
+
+rem The LIMBO banner.
+:banner
+echo.
+echo %C% ___       ___  _____ ______   ________  ________
+echo ^|\  \     ^|\  \^|\   _ \  _   \^|\   __  \^|\   __  \
+echo \ \  \    \ \  \ \  \\\__\ \  \ \  \^|\ /\ \  \^|\  \
+echo  \ \  \    \ \  \ \  \\^|__^| \  \ \   __  \ \  \\\  \
+echo   \ \  \____\ \  \ \  \    \ \  \ \  \^|\  \ \  \\\  \
+echo    \ \_______\ \__\ \__\    \ \__\ \_______\ \_______\
+echo     \^|_______^|\^|__^|\^|__^|     \^|__^|\^|_______^|\^|_______^|%R%
+echo.
 exit /b
 
 rem Node.js runs the backend and builds the patch pak. Installs it with winget when it's missing.
