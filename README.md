@@ -27,6 +27,10 @@ OT6.5\
 
 Get Limbo from the [Releases](https://github.com/ArielS-gif/Limbo/releases) page, and the backend (`Limbo-Backend.zip`) from [Limbo-Backend's Releases](https://github.com/ArielS-gif/Limbo-Backend/releases).
 
+After that, both update themselves: `Play Limbo.bat` checks for a new release every time it starts, downloads it,
+checks its SHA-256 and copies it in (your accounts, settings and logs stay). The backend is updated while it isn't
+running. To turn that off, put an empty `no-update.txt` in `Limbo\out`.
+
 ### Hosting
 
 1. Run `Play Limbo.bat` and press Enter. The first time, it installs [Node.js](https://nodejs.org) if you don't have

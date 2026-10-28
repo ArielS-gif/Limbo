@@ -33,8 +33,10 @@ jobs:
           $name = "Limbo-${{ github.ref_name }}" -replace '[^A-Za-z0-9._-]', '-'
           New-Item -ItemType Directory -Force pkg/Limbo/out, pkg/Limbo/tools | Out-Null
           Copy-Item out/gameserver.dll, out/injector.exe pkg/Limbo/out/
-          Copy-Item tools/build-patch-pak.js, tools/pak.js, tools/discover.js pkg/Limbo/tools/
+          Copy-Item tools/build-patch-pak.js, tools/pak.js, tools/discover.js, tools/update.js pkg/Limbo/tools/
           Copy-Item README.md, LICENSE, "Play Limbo.bat" pkg/Limbo/
+          # The release it is, which tools/update.js compares with GitHub's latest (a branch build: never updated).
+          Set-Content -NoNewline -Encoding ascii -Path pkg/Limbo/VERSION -Value "${{ github.ref_name }}"
           Compress-Archive -Path pkg/Limbo -DestinationPath "$name.zip"
           $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"

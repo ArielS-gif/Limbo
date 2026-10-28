@@ -741,6 +741,17 @@ From the host's logs of the first co-op game over Radmin VPN (the friend's weren
   right". The pool (GTexturePoolSize, an int64 at 031D2B40, set by the D3D11 device setup at 00F77C9D and read by the
   texture streaming every update) is raised to 400 MB when it is set lower (fixes.cpp). His crash is still unexplained;
   with so little memory for a 32-bit game, running out of it is likely.
+- **Updates by themselves** (Play Limbo.bat, tools/update.js, before the menu): each install names its release in a
+  VERSION file (the Limbo zip gets it from the CI's tag, the backend has it in its repository; the updater writes it
+  after an update). GitHub's latest release (api.github.com/repos/ArielS-gif/<repo>/releases/latest) newer than that:
+  its zip is downloaded, checked against its .sha256, unpacked with Windows' tar and copied over the install, so files
+  the zip doesn't have stay (out\ settings and logs; the backend's data, .env, node_modules). The backend (Limbo-Backend
+  next to Limbo) only while 127.0.0.1:3551 doesn't answer, with npm install when package.json changed. A folder without
+  a VERSION, a git checkout, out\no-update.txt or no answer from GitHub: nothing happens. When Play Limbo.bat itself is
+  replaced it starts again in a new window: the updater's line ends with `if errorlevel 2 (start ... & exit)`, and cmd
+  has read that whole line before the file changes under it (tested: a batch file rewritten by the program it runs takes
+  that branch and runs none of the new text). Tested from a v0.1.4 / v0.3.0 install: both updated, settings, accounts and
+  .env kept, the launcher restarted as the new one.
 
 ## Co-op (2026-10-27): up to 4 players in one zone (`net.cpp`)
 

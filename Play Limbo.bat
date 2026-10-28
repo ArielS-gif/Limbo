@@ -42,6 +42,14 @@ tasklist /fi "imagename eq FortniteClient-Win64-Shipping.exe" | findstr /i "Fort
 rem Node.js builds the patch pak (and runs the backend on the host's PC).
 call :node || goto end
 
+rem Updates from GitHub's latest releases (tools\update.js): Limbo, and this PC's backend while it isn't running. When
+rem this file itself was replaced, it starts again in a new window; all on one line, which cmd has read whole before the
+rem file changes under it.
+echo  Checking for updates...
+node "%LIMBO%tools\update.js" "%LIMBO%." "%ROOT%" & if errorlevel 3 (timeout /t 3 /nobreak >nul) else if errorlevel 2 (start "Limbo" cmd /c "%~f0" & exit)
+set "VERSION="
+if exist "%LIMBO%VERSION" set /p VERSION=<"%LIMBO%VERSION"
+
 :menu
 rem Whose backend: out\play-on.txt says "auto" (a friend's found on the network, the one with players online first,
 rem else this PC's), "host" (this PC's) or a friend's address. Before it existed, out\backend.txt held that address.
@@ -73,6 +81,8 @@ if /i not "%TUTORIAL%"=="play" set "TUTORIAL=skip"
 rem The screen, drawn afresh after every key.
 cls
 call :banner
+if defined VERSION echo  %D%Limbo %VERSION% - it updates itself when a new one is out%R%
+if defined VERSION echo.
 if "%MODE%"=="friend" echo  %C%SERVER%R%    your friend's, at %ADDRESS%
 if "%MODE%"=="host" echo  %C%SERVER%R%    this PC hosts - friends can join you
 if "%MODE%"=="auto" if defined FOUND echo  %C%SERVER%R%    your friend's, found on your network: %FOUND% - %ADDRESS%
