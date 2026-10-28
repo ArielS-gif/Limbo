@@ -33,8 +33,9 @@ Get Limbo from the [Releases](https://github.com/ArielS-gif/Limbo/releases) page
    it (Windows asks for permission, click Yes) and sets up the backend. It shows the addresses your friends can join.
 2. Log in with any name and password, pick a mission and press Play.
 
-Accounts are saved in `Limbo-Backend\data`. Delete that folder to start over. New accounts skip the homebase tutorial;
-press T in `Play Limbo.bat`'s menu to play it instead.
+Accounts are saved in `Limbo-Backend\data`. Delete that folder to start over. Accounts skip the tutorial (the homebase
+and the first outpost), so the Friends list works from the start; press T in `Play Limbo.bat`'s menu to play it
+instead.
 
 ### Joining a friend
 

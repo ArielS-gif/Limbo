@@ -698,12 +698,18 @@ From the host's logs of the first co-op game over Radmin VPN (the friend's weren
   mission of its own) goes through StartMatchmaking, not StartCriticalMission (the ribbon's Start button,
   MissionSelect-RibbonContent); the hex has no mission to open, so the game's own search ran. StartMatchmaking now picks a
   random mission tile there too, as StartCriticalMission did.
-- **The homebase tutorial is a choice.** Play Limbo.bat asks (T in its menu; out\tutorial.txt, skip by default) and
-  tells the backend this player plays on (POST ot65/tutorial/skip or /play, kept per address). When that player logs in,
-  an account still in the tutorial is moved past it (Limbo-Backend src/util/tutorial.js): the quest claimed, the home
-  base named "<name>'s Base", the four heroes recruited at level 20 (the Commando the default), the tutorial's gameplay
-  stats, the buildings that waited for it. Tested both ways with new accounts: straight to the main menu, or Ray's
-  "Getting Started".
+- **The tutorial is a choice.** Play Limbo.bat asks (T in its menu; out\tutorial.txt, skip by default) and tells the
+  backend this player plays on (POST ot65/tutorial/skip or /play, kept per address). To the game the tutorial is the
+  Onboarding quests: HomebaseOnboarding, OutpostQuest_T1_L1 (Stonewood's first storm shield defense) and
+  HomebaseOnboardingAfterOutpost (which the outpost's quest gives). While one is open Ray's "Getting Started" leads on
+  (to the outpost) and the Friends list stays locked: the quest manager's tutorial check (008A01A0) wants every Onboarding
+  quest Completed or Claimed. When the player logs in, an account still in it is moved past it (Limbo-Backend
+  src/util/tutorial.js): the three quests completed and claimed in order (completeQuest gives their rewards: the
+  outpost's next quests, the daily quest trigger, its construction plans), the home base named "<name>'s Base", the four
+  heroes recruited at level 20 (the Commando the default), the tutorial's gameplay stats, the buildings that waited for
+  it. The first version claimed only the homebase's quest. Tested: a new account and one half-way (the homebase done)
+  both come out with the quests of an account that played the first outpost, and bTutorialCompleted set; with "play", a
+  new account gets Ray's "Getting Started".
 - **Joining a friend without deleting paks, or typing anything.** Play Limbo.bat has a menu: Enter (start), J (a
   friend's address), H (always host), A (automatic), T (the tutorial). The choice is out\play-on.txt ("auto", "host" or
   an address; an older install's out\backend.txt address is taken over); the backend actually used is written to

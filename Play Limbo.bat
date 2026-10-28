@@ -4,8 +4,8 @@ rem loaded into it as soon as it starts. Expects next to each other: "Fortnite (
 rem on the host's PC, the backend (Limbo-Backend). A small menu first. Whose backend (out\play-on.txt): by itself, a
 rem friend's found on the network (Radmin VPN, a LAN; tools\discover.js), else this PC's own ("auto"); a friend's by
 rem address; or always this PC's ("host"). The one chosen goes in out\backend.txt for Limbo's DLL, and the patch pak is
-rem rebuilt whenever it changes. And whether new accounts play the homebase tutorial (out\tutorial.txt; the backend is
-rem told before the game starts).
+rem rebuilt whenever it changes. And whether accounts play the tutorial, the homebase's and the first outpost
+rem (out\tutorial.txt; the backend is told before the game starts).
 setlocal
 title Limbo
 echo.
@@ -66,15 +66,15 @@ if "%MODE%"=="friend" echo  Playing on a friend's backend: %ADDRESS%
 if "%MODE%"=="host" echo  Playing on this PC's backend: friends can join you.
 if "%MODE%"=="auto" if defined FOUND echo  Joining a friend's game found on your network: %FOUND% - %ADDRESS%
 if "%MODE%"=="auto" if not defined FOUND echo  No friend's game on your network yet: this PC hosts, and friends can join you.
-if "%TUTORIAL%"=="skip" echo  New accounts skip the homebase tutorial.
-if "%TUTORIAL%"=="play" echo  New accounts play the homebase tutorial.
+if "%TUTORIAL%"=="skip" echo  Accounts skip the tutorial ^(the homebase and the first outpost^).
+if "%TUTORIAL%"=="play" echo  Accounts play the tutorial ^(the homebase and the first outpost^).
 echo.
 echo    Enter   start the game
 echo    J       join a friend by the address their Limbo window shows
 echo    H       always host on this PC
 if not "%MODE%"=="auto" echo    A       find a friend's game on the network by itself ^(Radmin VPN, LAN^)
 if "%MODE%"=="auto" echo    R       look again
-echo    T       turn the homebase tutorial on or off
+echo    T       turn the tutorial on or off
 echo.
 set "PICK="
 set /p "PICK=  > "
