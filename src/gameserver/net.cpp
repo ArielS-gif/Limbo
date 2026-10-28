@@ -121,9 +121,10 @@ constexpr ULONGLONG kRestartDelayMs = 2000, kRestartRetryMs = 5000;
 // The zone's tiles: each foundation replicates the level it picked (LevelToStream) and builds its streaming level on
 // the client, but the "load and show" a client gets for them (AGameMode::ReplicateStreamingStatus, FortGameMode vtable
 // +0x378: ClientUpdateLevelStreamingStatus for every streaming level) is sent once at join, before those streaming
-// levels exist there. It is sent again while the player is new, then now and then (tiles bring their own foundations).
+// levels exist there. It is sent again 5, 10, 20 and 40 s later, then every minute (tiles bring their own foundations).
+// Every 5 s for 3 minutes (44 levels a time over a VPN) stalled the host for up to 16 s in one of those sends.
 constexpr int VtGameModeReplicateStreamingStatus = 0x378;
-constexpr ULONGLONG kStatusEarlyMs = 5000, kStatusEarlyForMs = 180000, kStatusLateMs = 30000;
+constexpr ULONGLONG kStatusFirstMs = 5000, kStatusLateMs = 60000;
 // And a joined client doesn't get through its loads by itself (the levels sit with a load request pending); the
 // server's world manager blocks on them, so the client does too: GameplayStatics.FlushLevelStreaming every 2 s.
 constexpr ULONGLONG kClientFlushMs = 2000;
@@ -153,7 +154,8 @@ int g_port = 0;
 struct Joiner {
     uintptr_t pc;
     ULONGLONG seen, nextRestart, nextStatus;
-    uintptr_t setupPawn;  // the pawn the player setup ran for
+    uintptr_t setupPawn;           // the pawn the player setup ran for
+    ULONGLONG statusGap = kStatusFirstMs;  // until the next streaming status: doubles, up to kStatusLateMs
 };
 constexpr ULONGLONG kHeroWaitMs = 8000;  // a joined player's loadout from the backend, before spawning without it
 std::vector<Joiner> g_joiners;  // joined controllers waiting for (or given) a pawn
@@ -492,6 +494,31 @@ bool AllowChatLogin() {
     bool plain = engine::PatchByte(kSaslPlainCheck, kJne, kJmp);
     LOG("net: chat login %s", plain ? "allowed without TLS (the backend's XMPP server)" : "NOT patched");
     return plain;
+}
+
+// "Remember me": the next start logs in with the saved refresh token as the game starts, while the login screen's own
+// service-status question (asked as the application, before anyone is logged in) is still out. The status answer's
+// handler (007DBAA0) takes any answer that arrives during a login as the login's own service check and calls
+// ContinueLoggingIn(2), which finds the login still in its first step (1) and aborts it ("unexpected logout or state
+// change"); the game then forgets the saved token. An answer in that first step is ignored here: once logged in, the
+// login asks for the service status itself.
+constexpr uint32_t kContinueLoggingIn = 0x007C46B0;      // UFortOnlineAccount (expected step), thiscall, ret 4
+constexpr uint32_t kStatusContinueCall = 0x007DBB54;     // its call in the status answer's handler
+constexpr int OnlineAccountLoginStep = 0x10C;
+constexpr int kStepLoggingIn = 1;
+
+void __fastcall StatusContinueLoggingIn(uintptr_t account, void*, int expected) {
+    if (At<int32_t>(account, OnlineAccountLoginStep) == kStepLoggingIn) {
+        LOG("net: a service status answer arrived while still logging in (a remembered login): left for the login's own check");
+        return;
+    }
+    reinterpret_cast<void(__thiscall*)(uintptr_t, int)>(engine::Va(kContinueLoggingIn))(account, expected);
+}
+
+bool AllowRememberedLogin() {
+    bool ok = engine::PatchCall(kStatusContinueCall, kContinueLoggingIn, reinterpret_cast<void*>(&StatusContinueLoggingIn));
+    LOG("net: remembered logins %s", ok ? "no longer abort on an early service status answer" : "NOT patched");
+    return ok;
 }
 
 bool Install() {
@@ -868,18 +895,37 @@ void Advance(ULONGLONG now) {
     if (!Hosting()) return;
     engine::TArray& connections = At<engine::TArray>(g_driver, DriverClientConnections);
     uintptr_t gameMode = engine::GameMode();
+    // A player who left (their connection gone, their controller destroyed) is forgotten at once: once the garbage
+    // collector has freed the controller, its address can hold another object, and the host's Leave called
+    // ClientReturnToMainMenu on that (a crash, seconds after a friend went back to the lobby).
+    std::vector<uintptr_t> connected;
+    for (int32_t c = 0; c < connections.num; c++) {
+        uintptr_t connection = At<uint32_t>(connections.data, c * 4);
+        if (connection) connected.push_back(At<uint32_t>(connection, ConnPlayerController));
+    }
+    for (auto joiner = g_joiners.begin(); joiner != g_joiners.end();) {
+        if (std::find(connected.begin(), connected.end(), joiner->pc) != connected.end() && Live(joiner->pc)) {
+            ++joiner;
+            continue;
+        }
+        LOG("net: a joined player left (controller 0x%08X)", static_cast<unsigned>(joiner->pc));
+        loadout::Forget(joiner->pc);
+        player::Forget(joiner->pc);
+        joiner = g_joiners.erase(joiner);
+    }
     for (int32_t c = 0; c < connections.num; c++) {
         uintptr_t connection = At<uint32_t>(connections.data, c * 4);
         uintptr_t pc = connection ? At<uint32_t>(connection, ConnPlayerController) : 0;
         if (!pc || !Live(pc)) continue;
         auto joiner = std::find_if(g_joiners.begin(), g_joiners.end(), [pc](const Joiner& j) { return j.pc == pc; });
         if (joiner == g_joiners.end()) {
-            g_joiners.push_back({ pc, now, now + kRestartDelayMs, now + kStatusEarlyMs, 0 });
+            g_joiners.push_back({ pc, now, now + kRestartDelayMs, now + kStatusFirstMs, 0 });
             LOG("net: %s joined", engine::Describe(pc).c_str());
             continue;
         }
         if (gameMode && now >= joiner->nextStatus) {
-            joiner->nextStatus = now + (now - joiner->seen < kStatusEarlyForMs ? kStatusEarlyMs : kStatusLateMs);
+            joiner->nextStatus = now + joiner->statusGap;
+            joiner->statusGap = (std::min)(joiner->statusGap * 2, kStatusLateMs);
             reinterpret_cast<void(__thiscall*)(uintptr_t, uintptr_t)>(
                 At<uint32_t>(At<uint32_t>(gameMode, 0), VtGameModeReplicateStreamingStatus))(gameMode, pc);
         }

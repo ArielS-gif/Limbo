@@ -3,6 +3,7 @@
 #include "hook.h"
 #include "log.h"
 #include "ue.h"
+#include <windows.h>
 #include <cstdint>
 #include <set>
 
@@ -70,7 +71,29 @@ static void __cdecl NoDebugBox(uintptr_t worldContext, float cx, float cy, float
             engine::Describe(worldContext).c_str(), cx, cy, cz, ex * 2, ey * 2, ez * 2);
 }
 
+// Integrated graphics: the texture pool is 70% of the *dedicated* video memory (the D3D11 device setup, 00F77C9D,
+// writes GTexturePoolSize, an int64 at 031D2B40), and an Intel Iris Xe reports 128 MB of it: an 89 MB pool (716 MB on a
+// 3 GB card), so characters and the world stay at their blurriest (a friend's hero head "wasn't rendered right"). The
+// texture streaming reads the global every update, so a pool under 400 MB is raised to that once it is set: these GPUs
+// draw from the shared system memory anyway.
+constexpr uint32_t kTexturePoolSize = 0x031D2B40;
+constexpr int64_t kMinTexturePool = 400LL << 20;
+
+static DWORD WINAPI RaiseTexturePool(LPVOID) {
+    auto pool = reinterpret_cast<volatile int64_t*>(engine::Va(kTexturePoolSize));
+    for (int i = 0; i < 600 && *pool == 0; i++) Sleep(100);  // set while the renderer starts
+    int64_t was = *pool;
+    if (was > 0 && was < kMinTexturePool) {
+        *pool = kMinTexturePool;
+        LOG("fixes: the texture pool was %lld MB (little dedicated video memory); now %lld MB", was >> 20, kMinTexturePool >> 20);
+    } else {
+        LOG("fixes: the texture pool is %lld MB", was >> 20);
+    }
+    return 0;
+}
+
 bool Install() {
+    if (HANDLE t = CreateThread(nullptr, 0, RaiseTexturePool, nullptr, 0, nullptr)) CloseHandle(t);
     bool boxes = engine::PatchCall(kDrawDebugBoxCall, kDrawDebugBox, reinterpret_cast<void*>(&NoDebugBox));
     LOG("fixes: blueprints' debug boxes %s", boxes ? "are not drawn" : "NOT patched (still drawn)");
     int off = 0;

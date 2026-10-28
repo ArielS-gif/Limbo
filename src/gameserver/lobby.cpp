@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <cstring>
 #include <mutex>
+#include <set>
 
 namespace lobby {
 
@@ -97,6 +98,16 @@ constexpr uint32_t kWeakGet = 0x00DA4200;  // FWeakObjectPtr::Get(bool bEvenIfPe
 constexpr uint8_t kMatchmakingSuccess = 5, kMatchmakingCancelled = 1;  // EMatchmakingCompleteResult
 constexpr int kLobbySeconds = 60;
 constexpr ULONGLONG kLobbyPollMs = 1000, kMemberWaitMs = 180000;
+// The Friends list (the social panel): Join on a friend calls FortPartyContext.JoinParty, whose party join fails here
+// (UnknownClientFailure in the game's party code; no request is even sent), and CanBeJoined enables the button. The
+// implementations' calls in both exec thunks are wrapped: a friend the backend knows to be on a launch screen or in a
+// game with room (ot65/joinable, asked every 3 s in the main menu) can be joined, and Join puts this player on that
+// launch screen or into that game, as Play would. A social item's friend (FOnlineFriendMcp, +0x44) has its id
+// (FUniqueNetIdString, +0xC), whose string (+0xC) is the account id.
+constexpr uint32_t kCanBeJoinedCall = 0x00A222D9, kCanBeJoined = 0x00804180;  // UFortPartyContext (item, uint8* reason) -> bool
+constexpr uint32_t kJoinPartyCall = 0x00A40693, kJoinParty = 0x0081F230;       // UFortPartyContext (item), ret 4
+constexpr int SocialItemType = 0x1C, kSocialItemFriend = 1, SocialItemFriendInfo = 0x44, FriendUserId = 0xC, NetIdString = 0xC;
+constexpr ULONGLONG kJoinablePollMs = 3000;
 
 struct Lobby {
     bool active = false, started = false, launch = false, ready = false, cancel = false;
@@ -130,6 +141,9 @@ std::mutex g_sharedLock;
 Shared g_shared;
 uint64_t g_generation = 0;
 std::string g_mission, g_theater;  // the selected tile's mission and theater, for the backend
+std::mutex g_joinableLock;
+std::set<std::string> g_joinable;  // friends with a launch screen or game to join (worker thread writes)
+ULONGLONG g_nextJoinable = 0;
 
 std::string g_travel;     // the zone to open on the next tick (not from inside the UI's call)
 std::string g_generator;  // the mission generator for the zone being opened
@@ -276,7 +290,7 @@ void CallExec(uint32_t exec, uintptr_t context, void* stack, void* result) {
     reinterpret_cast<void(__thiscall*)(uintptr_t, void*, void*)>(engine::Va(exec))(context, stack, result);
 }
 
-void StartLaunchScreen(uintptr_t context);
+void StartLaunchScreen(uintptr_t context, const std::string& friendHost = "");
 
 void __fastcall ExecStartMatchmaking(uintptr_t context, void*, void* stack, void* result) {
     if (g_lobby.active) {  // a launch from the launch screen itself
@@ -284,7 +298,9 @@ void __fastcall ExecStartMatchmaking(uintptr_t context, void*, void* stack, void
         g_lobby.launch = true;
         return;
     }
-    if (OpenSelected()) {
+    // Play on the Quick Match hex (BP_Hex_CriticalMission, no mission of its own) comes here too, not through
+    // StartCriticalMission: a random mission, as there. The game's own search never finds a server ("Releasing Lock").
+    if (OpenSelected() || OpenQuickMatch(0, 0)) {
         Finish(stack);
         StartLaunchScreen(context);
         return;
@@ -305,7 +321,7 @@ void __fastcall StartCriticalMission(uintptr_t context, void*, int32_t minPower,
 }
 
 // The launch screen for the zone in g_travel; Advance opens the zone (or joins another player's) when it ends.
-void StartLaunchScreen(uintptr_t context) {
+void StartLaunchScreen(uintptr_t context, const std::string& friendHost) {
     g_lobby = Lobby{};
     g_lobby.active = true;
     g_lobby.context = context;
@@ -319,13 +335,15 @@ void StartLaunchScreen(uintptr_t context) {
     }
     if (g_lobby.account.empty()) return;  // no account id: alone, as before
     std::string json = "{\"accountId\":\"" + g_lobby.account + "\",\"missionId\":\"" + g_mission + "\",\"theaterId\":\"" +
-                       g_theater + "\",\"seconds\":" + std::to_string(kLobbySeconds) + "}";
+                       g_theater + "\",\"seconds\":" + std::to_string(kLobbySeconds) +
+                       (friendHost.empty() ? "" : ",\"host\":\"" + friendHost + "\"") + "}";
     backend::Post(L"/fortnite/api/game/v2/ot65/lobby/play", json, [generation](int status, const std::string& body) {
         Shared answer;
         if (status == 200) ReadState(body, answer);
         answer.answer = status != 200                                   ? -1
                         : body.find("\"joined\"") != std::string::npos  ? 2
                         : body.find("\"running\"") != std::string::npos ? 3
+                        : body.find("\"none\"") != std::string::npos    ? 4
                                                                          : 1;
         std::lock_guard<std::mutex> guard(g_sharedLock);
         if (generation == g_generation) g_shared = answer;
@@ -472,6 +490,7 @@ void AdvanceLobby(uint64_t now) {
     // The backend's answer to Play.
     if (shared.answer && !g_lobby.answered) {
         g_lobby.answered = true;
+        if (shared.answer == 4) return LeaveLaunchScreen(context, "the friend has no launch screen or game to join any more");
         if (shared.answer == 3 && !shared.address.empty()) {  // another player's game runs: join it instead
             Broadcast(context, OnLobbyTimeExpired, params);
             LOG("lobby: another player's game runs at %s; joining it", shared.address.c_str());
@@ -518,6 +537,8 @@ void AdvanceLobby(uint64_t now) {
     }
     if (shared.fresh && g_lobby.answered && !g_lobby.host.empty()) {
         if (shared.closed) {
+            if (g_lobby.member && g_lobby.address.empty() && g_lobby.url.empty())  // joined from the Friends list: no mission of its own
+                return LeaveLaunchScreen(context, (g_lobby.host + "'s launch screen closed; left it").c_str());
             if (g_lobby.member && g_lobby.address.empty()) {
                 LOG("lobby: %s's launch screen closed; this one goes on alone with its own mission", g_lobby.host.c_str());
                 g_lobby.member = false;
@@ -621,6 +642,58 @@ void UnlockAllZones() {
     At<uint8_t>(controller, FrontEndUnlockAllZones) = 1;
     LOG("lobby: every zone unlocked (bUnlockAllZones)");
 }
+
+// The account id of a Friends list entry, or "" (a header, an invite).
+std::string FriendAccount(uintptr_t item) {
+    if (!engine::IsA(item, "FortSocialItem") || At<uint8_t>(item, SocialItemType) != kSocialItemFriend) return "";
+    uintptr_t info = At<uint32_t>(item, SocialItemFriendInfo);
+    uintptr_t id = info ? At<uint32_t>(info, FriendUserId) : 0;
+    return id ? ReadFString(id + NetIdString) : "";
+}
+
+bool Joinable(const std::string& account) {
+    std::lock_guard<std::mutex> guard(g_joinableLock);
+    return !account.empty() && g_joinable.count(account);
+}
+
+bool __fastcall CanBeJoined(uintptr_t context, void*, uintptr_t item, uint8_t* reason) {
+    if (Joinable(FriendAccount(item))) {
+        if (reason) *reason = 0;
+        return true;
+    }
+    return reinterpret_cast<bool(__thiscall*)(uintptr_t, uintptr_t, uint8_t*)>(engine::Va(kCanBeJoined))(context, item, reason);
+}
+
+void __fastcall JoinParty(uintptr_t context, void*, uintptr_t item) {
+    std::string account = FriendAccount(item);
+    uintptr_t matchmaking = engine::FindFirstA("FortMatchmakingContext");
+    if (!Joinable(account) || !matchmaking || g_lobby.active) {
+        reinterpret_cast<void(__thiscall*)(uintptr_t, uintptr_t)>(engine::Va(kJoinParty))(context, item);
+        return;
+    }
+    LOG("lobby: Join on %s in the Friends list: their launch screen or game", account.c_str());
+    g_travel.clear();  // no mission of this player's own
+    StartLaunchScreen(matchmaking, account);
+}
+
+// The friends that can be joined, from the backend, every few seconds in the main menu.
+void AskJoinable(ULONGLONG now) {
+    uintptr_t pc = engine::LocalPlayerController();
+    if (now < g_nextJoinable || !engine::IsA(pc, "FortPlayerControllerFrontEnd")) return;
+    g_nextJoinable = now + kJoinablePollMs;
+    std::string account = backend::AccountId(pc);
+    if (account.empty()) return;
+    std::string path = "/fortnite/api/game/v2/ot65/joinable/" + account;
+    backend::Get(std::wstring(path.begin(), path.end()), [](int status, const std::string& body) {
+        if (status != 200) return;
+        std::set<std::string> joinable;
+        size_t start = 0;
+        for (size_t end; (end = body.find('\n', start)) != std::string::npos; start = end + 1)
+            if (end > start) joinable.insert(body.substr(start, end - start));
+        std::lock_guard<std::mutex> guard(g_joinableLock);
+        g_joinable.swap(joinable);
+    });
+}
 }  // namespace
 
 bool Install() {
@@ -632,6 +705,9 @@ bool Install() {
     At<uint32_t>(function, FunctionNative) = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&ExecStartMatchmaking));
     if (!engine::PatchCall(kStartCriticalMissionCall, kStartCriticalMission, reinterpret_cast<void*>(&StartCriticalMission)))
         LOG("lobby: StartCriticalMission's call not found: a quest's mission tile still searches for a server");
+    bool friends = engine::PatchCall(kCanBeJoinedCall, kCanBeJoined, reinterpret_cast<void*>(&CanBeJoined)) &&
+                   engine::PatchCall(kJoinPartyCall, kJoinParty, reinterpret_cast<void*>(&JoinParty));
+    LOG("lobby: the Friends list's Join %s", friends ? "takes this player to that friend's launch screen or game" : "NOT wrapped");
     const struct {
         const char* function;
         uint32_t exec;
@@ -664,6 +740,7 @@ bool Install() {
 
 void Advance(uint64_t now) {
     UnlockAllZones();
+    AskJoinable(now);
     if (g_leaveZone) {
         g_leaveZone = false;
         LOG("lobby: left the party in a zone; back to the lobby");
@@ -765,6 +842,49 @@ void PlayFromTab(const std::string& part) {
     LOG("lobby: Play with %s selected (generators on the map:%s)", engine::Name(chosen).c_str(), generators.c_str());
     alignas(8) uint8_t params[64] = {};
     engine::ProcessEvent(context, engine::FindFunction("/Script/FortniteGame.FortMatchmakingContext.StartMatchmaking"), params);
+}
+
+// `party [invite <n> | join <n> | props <n>]`: the Friends panel's entries (FortPartyContext.GetSocialItemList) with
+// CanBeJoined's answer, and its actions on entry n, as its buttons do (tests).
+void PartyTest(const std::string& arg) {
+    uintptr_t pc = engine::LocalPlayerController();
+    uintptr_t library = engine::FindObject("/Script/FortniteGame.Default__BlueprintContextLibrary", "BlueprintContextLibrary");
+    struct {
+        uintptr_t object, cls, result;
+    } context{ pc, engine::FindClass("/Script/FortniteGame.FortPartyContext"), 0 };
+    engine::ProcessEvent(library, engine::FindFunction("/Script/FortniteGame.BlueprintContextLibrary.GetContext"), &context);
+    if (!engine::IsA(context.result, "FortPartyContext")) {
+        LOG("lobby: no party context here (%s)", engine::Describe(context.result).c_str());
+        return;
+    }
+    engine::TArray items{};
+    engine::ProcessEvent(context.result, engine::FindFunction("/Script/FortniteGame.FortPartyContext.GetSocialItemList"), &items);
+    std::string action;
+    int pick = -1;
+    {
+        size_t space = arg.find(' ');
+        action = arg.substr(0, space);
+        if (space != std::string::npos) pick = atoi(arg.c_str() + space + 1);
+    }
+    for (int32_t i = 0; items.data && i < items.num; i++) {
+        uintptr_t item = At<uint32_t>(items.data, i * 4);
+        struct {
+            uintptr_t item;
+            uint8_t reason;
+            bool result;
+            uint8_t pad[2];
+        } can{ item };
+        engine::ProcessEvent(context.result, engine::FindFunction("/Script/FortniteGame.FortPartyContext.CanBeJoined"), &can);
+        LOG("lobby: party entry %d: %s, can be joined %d (reason %d)", i, engine::Describe(item).c_str(), can.result, can.reason);
+        if (i != pick) continue;
+        if (action == "invite" || action == "join") {
+            uintptr_t one = item;
+            engine::ProcessEvent(context.result, engine::FindFunction(action == "invite" ? "/Script/FortniteGame.FortPartyContext.SendPartyInvite"
+                                                                                          : "/Script/FortniteGame.FortPartyContext.JoinParty"), &one);
+            LOG("lobby: party %s entry %d", action.c_str(), i);
+        }
+    }
+    LOG("lobby: %d party entries", items.num);
 }
 
 }  // namespace lobby

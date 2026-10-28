@@ -7,6 +7,11 @@
 // For a co-op friend: node build-patch-pak.js <host's LAN or VPN address>:3551 friendFortniteGame-WindowsClient_p.pak
 // and they copy that file into their own Paks folder.
 //
+// Play Limbo.bat uses two more forms:
+//   node build-patch-pak.js --address <file>        prints the backend address in the file, cleaned up (a byte-order
+//                                                   mark, spaces, http://; :3551 added), or 127.0.0.1:3551
+//   node build-patch-pak.js --if-needed <host:port>  builds the pak only when it doesn't point at that backend yet
+//
 // OT6.5 only loads extra paks named like the main one with a _p suffix (MercuryLauncher found the same), and a
 // file in a pak replaces the whole file, so the pak carries the complete ini.
 const fs = require('fs');
@@ -16,11 +21,49 @@ const pak = require('./pak');
 const kBuildDir = path.resolve(__dirname, '../../Fortnite (2252016-3240987)');
 const kPaksDir = path.join(kBuildDir, 'FortniteGame/Content/Paks');
 const kMainPak = path.join(kPaksDir, 'FortniteGame-WindowsClient.pak');
-const kPatchPak = process.argv[3] ? path.resolve(process.argv[3]) : path.join(kPaksDir, 'FortniteGame-WindowsClient_p.pak');
+const ifNeeded = process.argv[2] === '--if-needed';
+const args = ifNeeded ? process.argv.slice(3) : process.argv.slice(2);
+const kPatchPak = args[1] ? path.resolve(args[1]) : path.join(kPaksDir, 'FortniteGame-WindowsClient_p.pak');
 const kIniPath = 'FortniteGame/Config/DefaultEngine.ini';
 const kConfigDir = path.resolve(__dirname, '../config');
 
-const backend = process.argv[2] || '127.0.0.1:3551';
+function cleanAddress(text) {
+    const address = String(text || '').replace(/^﻿/, '').trim().split(/\s+/)[0] || '';
+    const bare = address.replace(/^[a-z]+:\/\//i, '').replace(/\/.*$/, '');
+    if (!bare) return '127.0.0.1:3551';
+    return /:\d+$/.test(bare) ? bare : `${bare}:3551`;
+}
+
+if (process.argv[2] === '--address') {
+    let text = '';
+    try { text = fs.readFileSync(process.argv[3], 'utf8'); } catch {}
+    console.log(cleanAddress(text));
+    process.exit(0);
+}
+
+const backend = cleanAddress(args[0]);
+
+// The ini in a pak built before, or ''.
+function builtIni() {
+    try {
+        const fd = fs.openSync(kPatchPak, 'r');
+        const entry = pak.readIndex(fd).entries.find((e) => e.name === kIniPath);
+        const text = entry ? pak.readEntry(fd, entry).toString('latin1') : '';
+        fs.closeSync(fd);
+        return text;
+    } catch {
+        return '';
+    }
+}
+
+if (ifNeeded) {
+    const ini = builtIni();
+    if (ini.includes(`Domain="${backend}"`) && ini.includes(`ServerAddr="${backend.split(':')[0]}"`)) {
+        console.log(`The patch pak points at ${backend}.`);
+        process.exit(0);
+    }
+    console.log(`Building the patch pak for ${backend}...`);
+}
 const settings = [
     // every MCP service (account, fortnite, friends, ...) builds its URLs from this base
     ['OnlineSubsystemMcp.BaseServiceMcp', 'Protocol', '"http"'],
@@ -73,4 +116,4 @@ fs.writeFileSync(path.join(kConfigDir, 'DefaultEngine.patched.ini'), patched);  
 fs.mkdirSync(path.dirname(kPatchPak), { recursive: true });
 pak.create(kPatchPak, [{ pakPath: kIniPath, data: patched }]);
 console.log(`wrote ${kPatchPak}`);
-for (const [section, key, value] of settings) console.log(`  [${section}] ${key}=${value}`);
+if (!ifNeeded) for (const [section, key, value] of settings) console.log(`  [${section}] ${key}=${value}`);

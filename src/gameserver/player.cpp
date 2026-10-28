@@ -546,6 +546,11 @@ void Reset() {
     g_setUp.clear();
 }
 
+// A joined player left: a controller made later at the same address (its memory reused) gets its own kit.
+void Forget(uintptr_t pc) {
+    g_setUp.erase(pc);
+}
+
 bool Setup(uintptr_t pc, uintptr_t pawn) {
     if (!pc || !pawn || !engine::IsA(pc, "FortPlayerController")) {
         LOG("player: no player to set up (%s, %s)", engine::Describe(pc).c_str(), engine::Describe(pawn).c_str());

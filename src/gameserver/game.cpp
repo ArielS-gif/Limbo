@@ -640,8 +640,20 @@ bool Command(const std::string& cmd, const std::string& arg) {
         g_queue.push_back([n] { lobby::Outpost(n); });
     } else if (cmd == "playmission" && !arg.empty()) {
         g_queue.push_back([arg] { lobby::PlayMission(arg); });
+    } else if (cmd == "disassemble" && !arg.empty()) {
+        g_queue.push_back([arg] { inventory::DisassembleTest(arg); });
+    } else if (cmd == "craft") {
+        g_queue.push_back([arg] { inventory::CraftTest(arg); });
+    } else if (cmd == "find" && !arg.empty()) {  // `find <class>`: the live objects of a class (and its children)
+        g_queue.push_back([arg] {
+            std::vector<uintptr_t> found = engine::FindAllA(arg.c_str());
+            for (size_t i = 0; i < found.size() && i < 20; i++) LOG("  %s", engine::Describe(found[i]).c_str());
+            LOG("find: %zu %s", found.size(), arg.c_str());
+        });
     } else if (cmd == "items") {
         g_queue.push_back([] { player::ListItems(); });
+    } else if (cmd == "party") {
+        g_queue.push_back([arg] { lobby::PartyTest(arg); });
     } else if (cmd == "lobbyplay") {
         g_queue.push_back([arg] { lobby::PlayFromTab(arg); });
     } else if (cmd == "drop" && !arg.empty()) {

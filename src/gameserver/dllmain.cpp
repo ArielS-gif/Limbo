@@ -72,6 +72,7 @@ static DWORD WINAPI MainThread(LPVOID) {
     // Code only, so before anything else: the game logs into chat right after its own login, which can come before
     // the engine tables below exist.
     net::AllowChatLogin();
+    net::AllowRememberedLogin();
 
     // Injected early (while the game starts), the engine tables come a little later: looked for again for a while.
     bool found = false;

@@ -629,6 +629,13 @@ Available"), other missions, co-op.
 - **Husk groups out on the map:** a group of 3-5 was spawned in one tick, a 55-80 ms hitch every 20 s. The members are
   queued and spawned one per tick (~4 ms each); their kinds are loaded at setup, under the loading screen, and the
   navigation system's first query (some 80 ms of setup) is made at the mission's start instead of with the first group.
+  That change (v0.1.3) set the roamer flag only around SpawnDefaultController, but a husk is possessed while it
+  spawns: the members were tracked as encounter husks, sent at the Atlas and never counted as roamers, so a group came
+  every 20 s (50-60 husks, 40+ on the Atlas, in the first co-op game). The flag covers the spawn again.
+- **Co-op stalls:** the streaming status a joined player is sent (ReplicateStreamingStatus, 44 levels in a city zone)
+  went out every 5 s for their first 3 minutes; over Radmin VPN the host stalled inside it, once for 16.6 s (the game's
+  log shows "Very long time between ticks" after it). It now goes out 5, 10, 20 and 40 s after the join, then every
+  minute.
 - **Injected too early:** `Play Limbo.bat`'s injector injects as soon as the game process appears. Once the DLL
   found the engine tables while only 2277 objects existed, before the game's own classes were registered:
   FortMatchmakingContext.StartMatchmaking and FortKismetLibrary.GetAIDirector weren't found, the Play tab's hook stayed
@@ -649,6 +656,85 @@ Available"), other missions, co-op.
   so it isn't seen.
 - Seen in the game's own log: entering an outpost from the map loads an "outpost view" (LoadOutpostView) whose JSON
   lacks numberOfItemsInStorage and outpostStructures (two LogJson errors each time; it goes on).
+
+### The first game with a friend; logins, Quick Match, the tutorial (2026-10-28)
+
+From the host's logs of the first co-op game over Radmin VPN (the friend's weren't available) and two-copy tests:
+
+- **The host crashed seconds after a friend left.** Its crash dump (minidump read by hand: an x86 call to address 1)
+  symbolized against a rebuild of v0.1.3 with a /MAP (the same bytes but the timestamps): game::Tick -> lobby::Advance
+  -> endzone::RequestLeave -> Leave -> SendHome -> ProcessEvent. The friend had gone back to the lobby
+  (ServerReturnToMainMenu, his controller destroyed); 7 s later the host's Leave with Party sent "go home" to every
+  joined controller, his included: net kept joined players by controller address, and by then the garbage collector
+  had freed it and another object lived there. A joined player is now forgotten the tick their connection is gone
+  (net::Advance), along with what was kept by that address: loadout's pawn classes, materials, autosave times and
+  ability systems (loadout::Forget), and the player's "kit given" mark (player::Forget). Without the last, a player
+  rejoining got a controller at the old address and no kit at all: an empty inventory.
+- **A joined player's crafting.** On the joined player's own copy the Craft button works (FortInventoryContext.
+  CanCraftSchematic counts through the controller's world inventory, 0074A680 -> 008506B0) and sends
+  ServerCraftSchematic(the schematic's profile item id). The implementation (00871AF0) looks the id up in that player's
+  MCP profile (0084FE60), and the host has only its own player's profile: nothing was found, nothing made. The lookup is
+  wrapped: the backend's loadout now lists every schematic of the profile ("schematic <item id> <name>"), the id is named
+  by it, and the host's own schematic item of that name stands in (every account has every schematic; else the recipe
+  is made directly). Tested: the joined player's pistol crafted on the host, in their quickbar, the ingredients taken.
+  `craft [name part]` presses Craft on this copy (tests).
+- **Disassembling did nothing, for anyone.** FortInventoryContext.DisassembleItem (02016170) and the server request's
+  slot 461 (00872570) call 0084B210, which checks the item, plays the feedback and, on a client, sends the request; on
+  the server nothing more (server code). Both calls are wrapped: on the server the item goes and half of what crafting it
+  took (rounded up) comes back. Its DisassemblyLootTierKey (Disassemble_Ranged_02 ...) names loot only the server's
+  tables have; this client carries LootTierData_Client alone and PickLootDrops finds nothing. `disassemble <name part>`
+  for tests. The inventory screen's drop now also works in outposts (their controller has its own vtable).
+- **The friend's head** (female Outlander): the joined player's CharacterParts are the same on both copies (head
+  F_S_Outlander_02_Head_01, body F_SML_Outlander, backpack, gauntlet) and both draw the head. Not reproduced.
+- **"Remember me" logged in once, then failed.** The game keeps the refresh token in GameUserSettings.ini
+  (RememberMeToken) and logs in with it as it starts (grant_type=refresh_token). The login screen asks for the service
+  status at the same time, as the application (before anyone is logged in). The answer's handler (007DBAA0) takes any
+  answer during a login as the login's own service check and calls ContinueLoggingIn(2) (007C46B0), which finds the
+  login still in step 1 and aborts it ("unexpected logout or state change during processing"); the game then forgets
+  the token. Holding the answer back doesn't help (the login's own status question then fails "Already pending"). The
+  call is wrapped from the moment the DLL loads: an answer in step 1 is left for the login's own check. Three starts in
+  a row logged in by themselves. The backend's refresh tokens last 30 days (24 hours before).
+- **Quick Match searched for a server ("Releasing Lock").** Play on the Quick Match hex (BP_Hex_CriticalMission_C, no
+  mission of its own) goes through StartMatchmaking, not StartCriticalMission (the ribbon's Start button,
+  MissionSelect-RibbonContent); the hex has no mission to open, so the game's own search ran. StartMatchmaking now picks a
+  random mission tile there too, as StartCriticalMission did.
+- **The homebase tutorial is a choice.** Play Limbo.bat asks (T in its menu; out\tutorial.txt, skip by default) and
+  tells the backend this player plays on (POST ot65/tutorial/skip or /play, kept per address). When that player logs in,
+  an account still in the tutorial is moved past it (Limbo-Backend src/util/tutorial.js): the quest claimed, the home
+  base named "<name>'s Base", the four heroes recruited at level 20 (the Commando the default), the tutorial's gameplay
+  stats, the buildings that waited for it. Tested both ways with new accounts: straight to the main menu, or Ray's
+  "Getting Started".
+- **Joining a friend without deleting paks, or typing anything.** Play Limbo.bat has a menu: Enter (start), J (a
+  friend's address), H (always host), A (automatic), T (the tutorial). The choice is out\play-on.txt ("auto", "host" or
+  an address; an older install's out\backend.txt address is taken over); the backend actually used is written to
+  out\backend.txt at every start, for the DLL. "auto" (the default) looks for a Limbo backend on the networks the PC is
+  on: tools\discover.js sends "LIMBO?" to UDP 3551 on each network's broadcast address (Radmin VPN's 26.255.255.255, the
+  LAN's) and the backend's src/discovery.js answers with its port, PC name and who is online; a friend's is joined (the
+  one with players online first), else this PC hosts. The patch pak is rebuilt whenever it doesn't point at the chosen
+  backend (build-patch-pak.js --if-needed reads the ini in the existing pak; --address cleans an address: a byte-order
+  mark, spaces, http://, the port added). A host is shown its addresses; a friend is told when the backend can't be
+  reached. (LIMBO_DISCOVER_SELF=1 lets discover.js find this PC's own backend, for tests on one PC.)
+- **The Friends list.** The backend's friends API answered [], so the game's Friends list was empty (the chat roster
+  already had everyone): every account on the backend is now an accepted friend, and accounts can be looked up several at
+  once (/account/api/public/account?accountId=...). Joining a friend's party there fails in the game's own party code
+  (FortPartyContext.JoinParty 0081F230: RejectInvitation fails, then UnknownClientFailure; no request is even sent), and
+  a party only takes members once its leader finished the Onboarding quests, the first outpost's included
+  (FortPartyGameState's check 0081ED00 reads FortParty.bTutorialCompleted +0x1D4, from the controller's +0xB70, from the
+  quest manager 008A01A0: "CurrentlyNotAvailable", 6). Instead the Friends list's Join is Limbo's own: CanBeJoined
+  (00804180, called at 00A222D9) and JoinParty (called at 00A40693) are wrapped; a friend the backend lists as joinable
+  (ot65/joinable/<me>: an open launch screen or a game with room, asked every 3 s in the main menu) can be joined, and
+  Join puts this player on that launch screen or into that game (lobby/play with { host }; { none } if neither any more).
+  A social item's account id: its friend (+0x44) -> the id (+0xC) -> its string (+0xC). Tested with two copies: Join on a
+  launch screen (both went into the zone when it launched) and on a game running (joined at once). `party [join|invite
+  <n>]` lists the Friends panel's entries and presses their buttons (tests); the backend logs every chat stanza with
+  LIMBO_XMPP_TRACE=1.
+- **The friend's logs** (sent later): his FortniteGame.log was copied while the game was starting (4 KB), and his
+  gameserver.log was an earlier start that left the main menu after half a minute with nothing logged by Limbo. They show
+  his PC: 3.8 GB of memory, 4 cores, and an Intel Iris Xe reporting 128 MB of dedicated video memory, so the texture pool
+  was 89 MB (716 MB on the host's 3 GB card): characters stay at their blurriest textures, the likely "head not rendered
+  right". The pool (GTexturePoolSize, an int64 at 031D2B40, set by the D3D11 device setup at 00F77C9D and read by the
+  texture streaming every update) is raised to 400 MB when it is set lower (fixes.cpp). His crash is still unexplained;
+  with so little memory for a 32-bit game, running out of it is likely.
 
 ## Co-op (2026-10-27): up to 4 players in one zone (`net.cpp`)
 
@@ -790,9 +876,8 @@ own address. A player who hosts needs UDP 7777 allowed in their own firewall.
    the game), but it exposes the backend, which has no real security.
 2. The host allows FortniteClient-Win64-Shipping.exe and node through Windows Firewall when Windows asks (private
    networks).
-3. The host makes the friend's patch pak: `node tools\build-patch-pak.js <host address>:3551 friend\FortniteGame-WindowsClient_p.pak`.
-4. The friend needs the same OT6.5 build folder, the OTGameServer out folder (injector.exe, gameserver.dll), that patch
-   pak in their FortniteGame\Content\Paks folder, and a backend.txt next to gameserver.dll with `<host address>:3551`.
-5. The friend starts the game (FortniteClient-Win64-Shipping.exe, or FortniteLauncher.exe with the same arguments as
-   tools\Play-OT65-Direct.ps1), logs in with any new name (the host's backend makes the account), runs injector.exe,
-   and presses Play while the host is in a zone (or types `cheatscript join`).
+3. The friend runs Play Limbo.bat, presses J and types the host's address (it goes in out\backend.txt; the patch pak is
+   rebuilt for it), then Enter. (By hand: `node tools\build-patch-pak.js <host address>:3551` and the address in
+   out\backend.txt.)
+4. The friend logs in with any new name (the host's backend makes the account) and presses Play while the host is in a
+   zone (or types `cheatscript join`).

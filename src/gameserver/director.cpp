@@ -543,10 +543,11 @@ void SpawnNextRoamer() {
     PendingRoamer member = g_pendingRoamers.front();
     g_pendingRoamers.erase(g_pendingRoamers.begin());
     float rotation[3] = { 0.0f, member.yaw, 0.0f };
-    uintptr_t husk = engine::SpawnActorAt(member.cls, 0, member.at, rotation, kAdjustButAlwaysSpawn);
-    if (!husk) return;
+    // A husk can be possessed while it spawns (its pawn spawns its own controller): the flag covers the spawn too, or
+    // it was tracked as an encounter husk (sent at the Atlas, and never counted, so a group came every 20 s).
     g_spawningRoamers = true;
-    engine::ProcessEvent(husk, engine::FindFunction("/Script/Engine.Pawn.SpawnDefaultController"), nullptr);  // tracked as a roamer
+    uintptr_t husk = engine::SpawnActorAt(member.cls, 0, member.at, rotation, kAdjustButAlwaysSpawn);
+    if (husk) engine::ProcessEvent(husk, engine::FindFunction("/Script/Engine.Pawn.SpawnDefaultController"), nullptr);
     g_spawningRoamers = false;
 }
 

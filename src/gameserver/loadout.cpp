@@ -120,8 +120,9 @@ std::map<uintptr_t, std::vector<Material>> g_materials;  // by controller, game 
 std::map<uintptr_t, uint64_t> g_nextAutoSave;            // by controller
 
 // The ability system lives on the player state, so a respawned pawn has the hero's kits and stats already.
-std::set<uintptr_t> g_statsAbilitySystems;  // the ability systems the heroes' stats went into
-std::set<uintptr_t> g_kitsAbilitySystems;   // the ones the heroes' kits went into
+// The ability systems the heroes' stats and kits went into, with their player's controller (forgotten when they leave).
+std::map<uintptr_t, uintptr_t> g_statsAbilitySystems;
+std::map<uintptr_t, uintptr_t> g_kitsAbilitySystems;
 // A controller's pawn class, resolved from its lobby hero before it spawns (0: the zone's default); the spawn reads it.
 std::map<uintptr_t, uintptr_t> g_pawnClasses;  // game thread
 
@@ -129,6 +130,8 @@ enum State { kIdle, kPending, kDone, kFailed };
 struct Entry {
     State state = kIdle;
     Loadout loadout;
+    std::map<std::string, std::string> schematics;  // the profile's schematic item ids -> their names (kept out of Loadout,
+                                                     // which is copied around: about a thousand of them)
 };
 std::mutex g_lock;                      // the requests' worker threads write these
 std::map<std::string, Entry> g_entries;  // by account id
@@ -136,7 +139,7 @@ int g_generation = 0;                   // a request from an earlier world is ig
 
 bool IsLocal(uintptr_t pc);
 
-Loadout Parse(const std::string& text) {
+Loadout Parse(const std::string& text, std::map<std::string, std::string>& schematics) {
     Loadout lobby;
     std::istringstream lines(text);
     for (std::string line; std::getline(lines, line);) {
@@ -161,6 +164,10 @@ Loadout Parse(const std::string& text) {
             Loadout::Structure structure{ 0, "", 0 };
             words >> structure.outpost >> structure.asset >> structure.level;
             if (structure.outpost > 0 && !structure.asset.empty() && structure.level > 0) lobby.structures.push_back(structure);
+        } else if (key == "schematic") {
+            std::string id, name;
+            words >> id >> name;
+            if (!id.empty() && !name.empty()) schematics[id] = name;
         } else if (key == "backpack") {
             Loadout::Carried carried{ "", 0, -1 };
             words >> carried.path >> carried.count >> carried.slot;
@@ -476,6 +483,25 @@ void Resolve(uintptr_t pc) {
         pawnClass ? engine::Name(pawnClass).c_str() : "the zone's default");
 }
 
+std::string SchematicName(uintptr_t pc, const std::string& itemId) {
+    std::string account = pc ? backend::AccountId(pc) : "";
+    std::lock_guard<std::mutex> guard(g_lock);
+    auto entry = g_entries.find(account);
+    if (entry == g_entries.end()) return "";
+    auto found = entry->second.schematics.find(itemId);
+    return found != entry->second.schematics.end() ? found->second : "";
+}
+
+// A joined player left: what was kept by their controller goes, or a player joining later at the same address (the
+// controller's memory is reused) would get their pawn class, materials or "stats already applied".
+void Forget(uintptr_t pc) {
+    g_pawnClasses.erase(pc);
+    g_materials.erase(pc);
+    g_nextAutoSave.erase(pc);
+    for (auto* systems : { &g_statsAbilitySystems, &g_kitsAbilitySystems })
+        for (auto it = systems->begin(); it != systems->end();) it = it->second == pc ? systems->erase(it) : std::next(it);
+}
+
 void Reset() {
     g_statsAbilitySystems.clear();
     g_kitsAbilitySystems.clear();
@@ -500,12 +526,14 @@ void Fetch(uintptr_t pc) {
     }
     std::wstring path = L"/fortnite/api/game/v2/ot65/loadout/" + std::wstring(account.begin(), account.end());
     backend::Get(path, [generation, account](int status, const std::string& body) {
-        Loadout lobby = status == 200 ? Parse(body) : Loadout{};
+        std::map<std::string, std::string> schematics;
+        Loadout lobby = status == 200 ? Parse(body, schematics) : Loadout{};
         {
             std::lock_guard<std::mutex> guard(g_lock);
             if (generation != g_generation) return;
             Entry& entry = g_entries[account];
             entry.loadout = lobby;
+            entry.schematics.swap(schematics);
             entry.state = status == 200 ? kDone : kFailed;
         }
         if (status == 200)
@@ -678,7 +706,7 @@ void Grant(uintptr_t pc, uintptr_t pawn, bool items) {
         LOG("loadout: the hero's kits are on this ability system already (a respawn)");
         return;
     }
-    g_kitsAbilitySystems.insert(abilitySystem);
+    g_kitsAbilitySystems[abilitySystem] = pc;
     Granted granted;
     for (const HeroKit& kit : Kits(heroType, lobby)) GrantKit(pc, pawn, iface, kit.kit, items, kit.items, granted);
     std::vector<uintptr_t> picked;
@@ -764,7 +792,7 @@ void ApplyStats(uintptr_t pc, uintptr_t pawn) {
         LOG("loadout: the hero's stats are on this ability system already: %s", player::StatLine(pc, pawn).c_str());
         return;
     }
-    g_statsAbilitySystems.insert(abilitySystem);
+    g_statsAbilitySystems[abilitySystem] = pc;
     uintptr_t ps = At<uint32_t>(pc, PcPlayerState);
     LOG("loadout: stats before the hero: %s (the pawn's ability system is %sthe player state's)", player::StatLine(pc, pawn).c_str(),
         ps && At<uint32_t>(ps, PlayerStateAbilitySystem) == abilitySystem ? "" : "not ");

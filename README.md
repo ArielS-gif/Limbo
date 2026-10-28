@@ -29,20 +29,23 @@ Get Limbo from the [Releases](https://github.com/ArielS-gif/Limbo/releases) page
 
 ### Hosting
 
-1. Run `Play Limbo.bat`. The first time, it installs [Node.js](https://nodejs.org) if you don't have it (Windows asks
-   for permission, click Yes) and sets up the backend.
+1. Run `Play Limbo.bat` and press Enter. The first time, it installs [Node.js](https://nodejs.org) if you don't have
+   it (Windows asks for permission, click Yes) and sets up the backend. It shows the addresses your friends can join.
 2. Log in with any name and password, pick a mission and press Play.
 
-Accounts are saved in `Limbo-Backend\data`. Delete that folder to start over.
+Accounts are saved in `Limbo-Backend\data`. Delete that folder to start over. New accounts skip the homebase tutorial;
+press T in `Play Limbo.bat`'s menu to play it instead.
 
 ### Joining a friend
 
 1. Get on the same network as them (same Wi-Fi, or Radmin VPN / Tailscale).
-2. Put your friend's address in `Limbo\out\backend.txt`, like `26.12.34.56:3551`.
-3. Run `Play Limbo.bat` (it installs Node.js the first time if you don't have it), log in, and press Play while
-   they're starting a mission or already in one.
+2. Run `Play Limbo.bat` after they started theirs. It finds their game on the network by itself; press Enter.
+   (If it doesn't, press J and type the address their Limbo window shows, like `26.12.34.56`.)
+3. Log in. Your friends are in the Friends list: press Join on one who is starting a mission or already in one, or
+   press Play while they are.
 
-The host has to allow TCP ports 3551 and 5222 in the firewall, and whoever hosts a mission needs UDP 7777.
+The host has to allow TCP ports 3551 and 5222 and UDP 3551 (so friends find it) in the firewall (allowing Node.js when
+Windows asks does it), and whoever hosts a mission needs UDP 7777.
 
 ## Is it safe?
 

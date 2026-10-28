@@ -27,6 +27,7 @@ bool Outpost();
 namespace net {
 bool Install();          // the IpNetDriver TickFlush wrapper (startup)
 bool AllowChatLogin();   // the game's chat login without TLS: first thing at load, before the game logs in
+bool AllowRememberedLogin();  // "remember me" logins survive the login screen's early service status answer (at load)
 void PatchCallSites();   // AFortGameSession::ValidatePlayer's calls (game thread)
 void Reset();            // the world changed
 void Prepare();          // the zone's first tick: its game net driver, not used yet, records what the zone destroys
@@ -111,6 +112,8 @@ int NavigationPending();  // bounds updates, dirty areas and tiles still to buil
 namespace loadout {
 bool Install();                                // zone players spawn as their lobby hero's pawn class (startup)
 void Reset();                                  // the world changed
+void Forget(uintptr_t pc);                     // a joined player left: drop what was kept by their controller
+std::string SchematicName(uintptr_t pc, const std::string& itemId);  // a schematic item id of the player's profile -> its name
 void Resolve(uintptr_t pc);                    // a player's lobby hero's pawn class, once the backend answered (game thread)
 void Fetch(uintptr_t pc);                      // asks the backend once per world (async)
 bool Settled(uintptr_t pc);                    // a player's answer is in, or there won't be one
@@ -130,6 +133,8 @@ void ApplyStats(uintptr_t pc, uintptr_t pawn);  // the hero card's stats: health
 
 namespace inventory {
 bool Install();  // the schematic item's craft slot and the Zone controller's drop slot (startup)
+void DisassembleTest(const std::string& part);  // `disassemble <name part>`: the inventory screen's Disassemble (tests)
+void CraftTest(const std::string& part);  // `craft [name part]`: the inventory screen's Craft button (tests)
 }
 
 // Server rules the client lacks: editing pieces still being built (with the reasons a piece can't be edited logged),
@@ -151,12 +156,14 @@ void Advance(uint64_t now);    // every tick, in the lobby too: picks up the cho
 std::wstring MissionInfo();    // the chosen mission's FortMissionInfo path for the zone being opened, or ""
 void ForgetMission();          // loaded: later zones use the default mission again
 void PlayFromTab(const std::string& part);
+void PartyTest(const std::string& arg);  // `party [invite|join <n>]`: the Friends panel's entries and actions (tests)
 void Outpost(int n);                        // `outpost [1-4]`: the outpost zone (the storm shield base)
 void PlayMission(const std::string& arg);   // `playmission <generator> [zone]`: that mission at once (tests)  // `lobbyplay [generator name part]`: Play on the Play tab (tests)
 }
 
 namespace player {
 void Reset();
+void Forget(uintptr_t pc);  // a joined player left: their controller's "kit given" mark goes
 bool Setup(uintptr_t pc, uintptr_t pawn);
 void ClientCheats(uintptr_t pc);
 void ListItems();                 // `items`: this copy's player's inventory, held weapon's clip, cheat flags  // a joined player's copy: the host's cheats on its own controller too (every tick)
